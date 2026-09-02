@@ -135,7 +135,7 @@ jobs:
             모요 요금제 크롤링 결과입니다.
             첨부된 Excel 파일을 확인해주세요.
 
-          attachments: ./moyoplan.xlsx
+          attachments: ./moyoplan_parsed_plans.xlsx
 
           # 메일 제목
           subject: "모요 요금제 크롤링 결과"
