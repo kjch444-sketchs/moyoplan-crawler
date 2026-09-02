@@ -1,4 +1,3 @@
-```python
 import time
 import re
 import pandas as pd
@@ -922,4 +921,3 @@ print(
 )
 
 print("=" * 70)
-```
