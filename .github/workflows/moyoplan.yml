@@ -129,7 +129,7 @@ jobs:
 
           # GitHub Secrets에서 가져옴
           username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }} wetj cmej ngaf mtmt
+          password: ${{ secrets.MAIL_PASSWORD }}
 
           # 메일 제목
           subject: "모요 요금제 크롤링 결과"
