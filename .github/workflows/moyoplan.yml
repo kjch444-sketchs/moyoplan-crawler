@@ -132,7 +132,7 @@ jobs:
 
           from: ${{ secrets.MAIL_USERNAME }}
 
-          to: "kjch444@lgplus.co.kr, junghoonchoi@lgplus.co.kr"
+          to: "kjch444@lguplus.co.kr, junghoonchoi@lguplus.co.kr"
 
           body: |
             안녕하세요.
