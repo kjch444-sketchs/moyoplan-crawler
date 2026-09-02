@@ -1,0 +1,6 @@
+```text
+pandas
+openpyxl
+beautifulsoup4
+selenium
+```
