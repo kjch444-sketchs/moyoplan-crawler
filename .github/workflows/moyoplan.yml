@@ -142,7 +142,7 @@ jobs:
           #
           # 아래 주소를 실제 받을 이메일 주소로 변경하세요.
           #
-          to: "kjch444@lguplus.co.kr"
+          to: "kjch444@lguplus.co.kr", "junghoonchoi@lguplus.co.kr"
 
           # 메일 본문
           body: |
