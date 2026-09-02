@@ -152,4 +152,3 @@ jobs:
           attachments: moyoplan_parsed_plans.xlsx
 
           priority: normal
-```
