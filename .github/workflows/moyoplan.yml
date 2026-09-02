@@ -122,14 +122,20 @@ jobs:
       - name: Send Excel by Gmail
         uses: dawidd6/action-send-mail@v18
         with:
-
-          # Gmail SMTP
           server_address: smtp.gmail.com
           server_port: 465
-
-          # GitHub Secrets에서 가져옴
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
+
+          subject: "모요 요금제 크롤링 결과"
+          from: ${{ secrets.MAIL_USERNAME }}
+          to: "kjch444@lgplus.co.kr, junghoonchoi@lgplus.co.kr"
+
+          body: |
+            모요 요금제 크롤링 결과입니다.
+            첨부된 Excel 파일을 확인해주세요.
+
+          attachments: ./moyoplan.xlsx
 
           # 메일 제목
           subject: "모요 요금제 크롤링 결과"
