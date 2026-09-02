@@ -115,6 +115,7 @@ jobs:
           fi
 
 
+    
       # ========================================================
       # 9. Gmail로 Excel 발송
       # ========================================================
@@ -128,28 +129,11 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
 
           subject: "모요 요금제 크롤링 결과"
+
           from: ${{ secrets.MAIL_USERNAME }}
+
           to: "kjch444@lgplus.co.kr, junghoonchoi@lgplus.co.kr"
 
-          body: |
-            모요 요금제 크롤링 결과입니다.
-            첨부된 Excel 파일을 확인해주세요.
-
-          attachments: ./moyoplan_parsed_plans.xlsx
-
-          # 메일 제목
-          subject: "모요 요금제 크롤링 결과"
-
-          # 발신자
-          from: ${{ secrets.MAIL_USERNAME }}
-
-          # 수신자
-          #
-          # 아래 주소를 실제 받을 이메일 주소로 변경하세요.
-          #
-          to: "kjch444@lguplus.co.kr", "junghoonchoi@lguplus.co.kr"
-
-          # 메일 본문
           body: |
             안녕하세요.
 
@@ -165,8 +149,7 @@ jobs:
 
             이 메일은 자동으로 발송되었습니다.
 
-          # Excel 첨부
           attachments: moyoplan_parsed_plans.xlsx
 
-          # 일반적인 우선순위
           priority: normal
+```
