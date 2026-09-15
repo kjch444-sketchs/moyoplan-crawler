@@ -1,4 +1,6 @@
+requests
+beautifulsoup4
 pandas
 openpyxl
-beautifulsoup4
-selenium
+urllib3
+truststore
