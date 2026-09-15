@@ -364,6 +364,7 @@ def parse_card_text(card_text: str) -> Dict[str, Any]:
         "통화제공량": normalize_call(call_raw),
         "문자제공량": normalize_sms(sms_raw),
         "데이터 제공량": data_amount,
+        "망정보": normalize_spaces(network_match.group(1)),
         "LTE/5G 구분": network_match.group(2).upper(),
         "월 요금": number_only(monthly_match.group(1)),
         "할인 기간": int(after_match.group(1)) if after_match else None,
@@ -406,6 +407,7 @@ def parse_detail_summary(
         result["데이터 제공량"] = data_text
         result["통화제공량"] = normalize_call(call_raw)
         result["문자제공량"] = normalize_sms(sms_raw)
+        result["망정보"] = normalize_spaces(network_match.group(1))
         result["LTE/5G 구분"] = network_match.group(2).upper()
         return result
 
@@ -491,6 +493,7 @@ def empty_result_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
         "통화제공량",
         "문자제공량",
         "데이터 제공량",
+        "망정보",
         "LTE/5G 구분",
         "월 요금",
         "할인 기간",
@@ -525,6 +528,7 @@ def format_excel_sheet(worksheet, dataframe: pd.DataFrame) -> None:
         "통화제공량": 14,
         "문자제공량": 14,
         "데이터 제공량": 30,
+        "망정보": 12,
         "LTE/5G 구분": 13,
         "월 요금": 14,
         "할인 기간": 12,
@@ -751,6 +755,8 @@ def crawl_dataset(
                 or card_info.get("문자제공량", ""),
                 "데이터 제공량": detail_info.get("데이터 제공량")
                 or card_info.get("데이터 제공량", ""),
+                "망정보": detail_info.get("망정보")
+                or card_info.get("망정보", ""),
                 "LTE/5G 구분": detail_info.get("LTE/5G 구분")
                 or card_info.get("LTE/5G 구분", ""),
                 "월 요금": card_info.get("월 요금"),
