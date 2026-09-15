@@ -3,15 +3,26 @@ name: Moyoplan Daily Crawler
 on:
   # ============================================================
   # 매일 한국시간 오전 7시 자동 실행
+  # GitHub Actions cron은 UTC 기준
+  # KST 07:00 = UTC 전날 22:00
   # ============================================================
   schedule:
-    - cron: "0 7 * * *"
-      timezone: "Asia/Seoul"
+    - cron: "0 22 * * *"
 
   # ============================================================
   # GitHub Actions 화면에서 수동 실행 가능
   # ============================================================
   workflow_dispatch:
+
+
+# ============================================================
+# 예약 실행과 수동 실행이 겹치는 경우 동시 실행 방지
+# 먼저 실행된 작업이 끝난 후 다음 작업 실행
+# ============================================================
+
+concurrency:
+  group: moyoplan-daily-crawler
+  cancel-in-progress: false
 
 
 jobs:
@@ -97,6 +108,9 @@ jobs:
 
       # ========================================================
       # 8. 최신 Excel 파일을 GitHub 저장소에 반영
+      #
+      # 크롤링 도중 main 브랜치가 변경되더라도
+      # 최신 원격 변경사항을 rebase한 뒤 push
       # ========================================================
 
       - name: Commit Excel result
@@ -108,14 +122,24 @@ jobs:
           git add moyoplan_parsed_plans.xlsx
 
           if git diff --cached --quiet; then
+
             echo "변경된 Excel 파일이 없습니다."
+
           else
+
             git commit -m "Update Moyoplan crawling result"
-            git push
+
+            echo "원격 main 브랜치의 최신 변경사항을 확인합니다."
+
+            git pull --rebase origin main
+
+            echo "크롤링 결과를 main 브랜치에 반영합니다."
+
+            git push origin HEAD:main
+
           fi
 
 
-    
       # ========================================================
       # 9. Gmail로 Excel 발송
       # ========================================================
@@ -125,6 +149,7 @@ jobs:
         with:
           server_address: smtp.gmail.com
           server_port: 465
+
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
 
