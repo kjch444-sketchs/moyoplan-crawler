@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import math
 import os
 import random
@@ -861,6 +862,112 @@ def _write_summary_sheet(worksheet, current_rows: List[Dict[str, Any]], ref_map:
     worksheet.sheet_view.showGridLines=False
 
 
+def _mail_html_table(title: str, headers: List[str], rows: List[List[Any]]) -> str:
+    def esc(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            if isinstance(v, float) and v.is_integer():
+                v = int(v)
+            return html.escape(f"{v:,}")
+        return html.escape(str(v))
+
+    parts = [
+        f'<h3 style="margin:24px 0 8px;color:#1F4E78;">{html.escape(title)}</h3>',
+        '<table style="border-collapse:collapse;width:100%;font-family:Arial,Malgun Gothic,sans-serif;font-size:13px;">',
+        '<tr>',
+    ]
+    for h in headers:
+        parts.append(f'<th style="border:1px solid #cfd8e3;background:#D9EAF7;padding:7px;text-align:center;">{html.escape(h)}</th>')
+    parts.append('</tr>')
+    if not rows:
+        parts.append(f'<tr><td colspan="{len(headers)}" style="border:1px solid #cfd8e3;padding:8px;text-align:center;color:#666;">해당 없음</td></tr>')
+    else:
+        for row in rows:
+            parts.append('<tr>')
+            for v in row:
+                align = 'right' if isinstance(v, (int, float)) and not isinstance(v, bool) else 'left'
+                parts.append(f'<td style="border:1px solid #cfd8e3;padding:7px;text-align:{align};vertical-align:top;">{esc(v)}</td>')
+            parts.append('</tr>')
+    parts.append('</table>')
+    return ''.join(parts)
+
+
+def generate_mail_body(
+    current_rows: List[Dict[str, Any]],
+    ref_map: Dict[str, str],
+    rs_count: int,
+    rm_count: int,
+    change_stats: Dict[str, int],
+) -> None:
+    """요약/통계와 가이드 위반 내용을 mail_body.html로 생성합니다."""
+    from collections import Counter
+    from datetime import datetime
+
+    classified = _classify_rows(current_rows, ref_map)
+    network = Counter(str(r.get("망정보") or "미확인") for r in classified)
+    fee = Counter(str(r.get("요금구분") or "미분류") for r in classified)
+    generation = Counter(str(r.get("LTE/5G 구분") or "미확인") for r in classified)
+
+    def n(value: Any) -> Optional[int]:
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    rs_items: List[List[Any]] = []
+    rm_items: List[List[Any]] = []
+    for row in classified:
+        if str(row.get("망정보") or "").strip() != "LG U+":
+            continue
+        fee_type = str(row.get("요금구분") or "").strip().upper()
+        price = n(row.get("월 요금"))
+        months = n(row.get("할인 기간"))
+        item = [row.get("사업자"), row.get("요금제"), row.get("월 요금"), row.get("할인 기간"), row.get("기간 이후 요금")]
+        if fee_type == "RS" and (price == 0 or (months is not None and months <= 6)):
+            rs_items.append(item)
+        elif fee_type == "RM" and (price == 0 or (months is not None and months <= 5)):
+            rm_items.append(item)
+
+    summary_rows = [
+        ["생성시각", datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+        ["기준", "페이백 미포함"],
+        ["전체 저장 행", len(classified)],
+        ["RS", fee.get("RS", 0)],
+        ["RM", fee.get("RM", 0)],
+        ["미분류", fee.get("미분류", 0)],
+        ["RS 가이드 위반", rs_count],
+        ["RM 가이드 위반", rm_count],
+        ["LG U+망", network.get("LG U+", 0)],
+        ["KT망", network.get("KT", 0)],
+        ["SKT망", network.get("SKT", 0)],
+        ["망정보 미확인", network.get("미확인", 0)],
+        ["LTE", generation.get("LTE", 0)],
+        ["5G", generation.get("5G", 0)],
+        ["전일 대비 신규", change_stats.get("신규", 0)],
+        ["전일 대비 삭제", change_stats.get("삭제", 0)],
+        ["월요금 인상", change_stats.get("월요금 인상", 0)],
+        ["월요금 인하", change_stats.get("월요금 인하", 0)],
+        ["기타 변경", change_stats.get("기타 변경", 0)],
+    ]
+
+    guide_headers = ["사업자", "요금제 명", "월 요금", "할인 기간", "기간 이후 요금"]
+    body = [
+        '<!doctype html><html><body style="font-family:Arial,Malgun Gothic,sans-serif;color:#222;line-height:1.5;">',
+        '<div style="max-width:1000px;margin:0 auto;">',
+        '<h2 style="color:#17365D;margin-bottom:4px;">모요 요금제 Daily Report</h2>',
+        '<p style="color:#666;margin-top:0;">자동 크롤링 및 가이드 점검 결과입니다.</p>',
+        _mail_html_table("요약 및 통계", ["항목", "값"], summary_rows),
+        _mail_html_table("RS 요금제 가이드 위반", guide_headers, rs_items),
+        _mail_html_table("RM 요금제 가이드 위반", guide_headers, rm_items),
+        '<p style="margin-top:28px;color:#666;">상세 내용은 첨부된 <b>moyoplan_parsed_plans.xlsx</b> 파일을 확인해 주세요.</p>',
+        '<p style="color:#888;font-size:12px;">이 메일은 자동으로 생성되었습니다.</p>',
+        '</div></body></html>',
+    ]
+    Path("mail_body.html").write_text(''.join(body), encoding="utf-8")
+    print("메일 본문 HTML: mail_body.html")
+
+
 def save_outputs(
     results: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
     errors: List[Dict[str, Any]],
@@ -916,6 +1023,7 @@ def save_outputs(
     desired = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "참조"]
     workbook._sheets = [workbook[name] for name in desired]
     workbook.save(output_path)
+    generate_mail_body(current_excluded, ref_map, rs_count, rm_count, change_stats)
 
     if errors:
         pd.DataFrame(errors).to_csv(
