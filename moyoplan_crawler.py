@@ -547,25 +547,375 @@ def format_excel_sheet(worksheet, dataframe: pd.DataFrame) -> None:
                 cell.number_format = "#,##0"
 
 
+DEFAULT_REFERENCE_ROWS = [
+    ("월 125GB + 5Mbps", "RS"),
+    ("월 95GB + 3Mbps", "RS"),
+    ("월 150GB + 5Mbps", "RS"),
+    ("월 100GB + 5Mbps", "RS"),
+    ("월 11GB + 매일 2GB + 3Mbps", "RS"),
+    ("매일 5GB + 5Mbps", "RS"),
+    ("월 15GB + 3Mbps", "RS"),
+    ("월 180GB + 10Mbps", "RS"),
+    ("월 31GB + 1Mbps", "RS"),
+    ("월 50GB + 1Mbps", "RS"),
+    ("월 80GB + 1Mbps", "RS"),
+    ("월 7GB + 1Mbps", "RS"),
+    ("월 7GB + 3Mbps", "RS"),
+]
+
+
+def _ensure_reference_sheet(workbook) -> None:
+    """기존 참조 시트를 보존하고, 비어 있을 때만 최초 RS 기준값을 복원합니다."""
+    if "참조" not in workbook.sheetnames:
+        ws = workbook.create_sheet("참조")
+    else:
+        ws = workbook["참조"]
+
+    # 사용자가 입력해 둔 B:C 데이터가 하나라도 있으면 절대 덮어쓰지 않습니다.
+    has_user_data = any(
+        ws.cell(r, 2).value not in (None, "") or ws.cell(r, 3).value not in (None, "")
+        for r in range(2, ws.max_row + 1)
+    )
+    if has_user_data:
+        return
+
+    # 참조 시트가 비어 있는 경우에만 원래 기준 데이터를 복원합니다.
+    ws.cell(1, 2).value = "모태"
+    ws.cell(1, 3).value = "구분"
+    for r, (data_amount, fee_type) in enumerate(DEFAULT_REFERENCE_ROWS, start=2):
+        ws.cell(r, 2).value = data_amount
+        ws.cell(r, 3).value = fee_type
+
+
+def _reference_map(workbook) -> Dict[str, str]:
+    """참조 시트 B:C를 읽어 데이터 제공량 -> 요금구분 매핑을 만듭니다."""
+    if "참조" not in workbook.sheetnames:
+        return {}
+    ws = workbook["참조"]
+    result: Dict[str, str] = {}
+    for row in range(2, ws.max_row + 1):
+        data_amount = ws.cell(row, 2).value
+        fee_type = ws.cell(row, 3).value
+        if data_amount not in (None, "") and fee_type not in (None, ""):
+            result[str(data_amount).strip()] = str(fee_type).strip()
+    return result
+
+
+def _sheet_rows_as_dicts(worksheet) -> List[Dict[str, Any]]:
+    """전일 비교용으로 기존 Sheet2 값을 읽습니다."""
+    if worksheet is None or worksheet.max_row < 2:
+        return []
+    headers = [worksheet.cell(1, c).value for c in range(1, worksheet.max_column + 1)]
+    rows: List[Dict[str, Any]] = []
+    for r in range(2, worksheet.max_row + 1):
+        values = [worksheet.cell(r, c).value for c in range(1, worksheet.max_column + 1)]
+        if not any(v not in (None, "") for v in values[:10]):
+            continue
+        rows.append({headers[i]: values[i] for i in range(len(headers)) if headers[i]})
+    return rows
+
+
+def _clear_sheet_values(worksheet) -> None:
+    for row in worksheet.iter_rows():
+        for cell in row:
+            cell.value = None
+
+
+def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
+    """원본 10개 컬럼 + K열 VLOOKUP 요금구분을 작성합니다."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    if worksheet.max_row:
+        worksheet.delete_rows(1, worksheet.max_row)
+
+    headers = list(dataframe.columns) + ["요금구분"]
+    for col, value in enumerate(headers, 1):
+        worksheet.cell(1, col).value = value
+
+    for r_idx, row in enumerate(dataframe.itertuples(index=False, name=None), 2):
+        for c_idx, value in enumerate(row, 1):
+            if pd.isna(value):
+                value = None
+            worksheet.cell(r_idx, c_idx).value = value
+        # 참조에 없는 데이터는 빈칸. 참조 시트에 RS/RM을 추가하면 자동 반영됩니다.
+        worksheet.cell(r_idx, 11).value = (
+            f'=IFERROR(VLOOKUP($E{r_idx},참조!$B:$C,2,0),"")'
+        )
+
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = f"A1:K{max(worksheet.max_row, 1)}"
+    worksheet.sheet_view.showGridLines = False
+    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    widths = [18, 42, 14, 14, 30, 12, 13, 14, 12, 16, 12]
+    for idx, width in enumerate(widths, 1):
+        from openpyxl.utils import get_column_letter
+        worksheet.column_dimensions[get_column_letter(idx)].width = width
+
+    for row in worksheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="center")
+        for col in (8, 9, 10):
+            row[col - 1].number_format = "#,##0"
+
+
+def _classify_rows(rows: List[Dict[str, Any]], ref_map: Dict[str, str]) -> List[Dict[str, Any]]:
+    classified = []
+    for row in rows:
+        item = dict(row)
+        item["요금구분"] = ref_map.get(str(item.get("데이터 제공량") or "").strip(), "")
+        classified.append(item)
+    return classified
+
+
+def _write_guide_sheet(worksheet, current_rows: List[Dict[str, Any]], ref_map: Dict[str, str]) -> Tuple[int, int]:
+    """I3/I19에 적어둔 기준으로 RS/RM 가이드 위반을 자동 작성합니다."""
+    from copy import copy
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    classified = _classify_rows(current_rows, ref_map)
+
+    def n(value):
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    rs = []
+    rm = []
+    for row in classified:
+        if str(row.get("망정보") or "").strip() != "LG U+":
+            continue
+        fee_type = str(row.get("요금구분") or "").strip().upper()
+        price = n(row.get("월 요금"))
+        months = n(row.get("할인 기간"))
+        if fee_type == "RS" and (price == 0 or (months is not None and months <= 6)):
+            rs.append(row)
+        elif fee_type == "RM" and (price == 0 or (months is not None and months <= 5)):
+            rm.append(row)
+        # 빈칸은 RS/RM 어느 쪽으로도 추정하지 않습니다.
+
+    # 사용자가 작성한 I3/I19 설명은 보존합니다.
+    i3 = worksheet["I3"].value
+    i19 = worksheet["I19"].value
+    _clear_sheet_values(worksheet)
+
+    title_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    header_fill = PatternFill(fill_type="solid", fgColor="E2F0D9")
+
+    def section(start_row: int, title: str, items: List[Dict[str, Any]], note: Optional[str]):
+        worksheet.cell(start_row, 2).value = title
+        worksheet.cell(start_row, 2).font = Font(bold=True, size=12)
+        worksheet.cell(start_row, 2).fill = title_fill
+        headers = ["순번", "사업자", "요금제 명", "월 요금", "할인 기간", "기간 이후 요금"]
+        for c, h in enumerate(headers, 2):
+            cell = worksheet.cell(start_row + 1, c)
+            cell.value = h
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+        if note:
+            worksheet.cell(start_row + 1, 9).value = note
+        for idx, item in enumerate(items, 1):
+            rr = start_row + 1 + idx
+            values = [idx, item.get("사업자"), item.get("요금제"), item.get("월 요금"), item.get("할인 기간"), item.get("기간 이후 요금")]
+            for c, value in enumerate(values, 2):
+                worksheet.cell(rr, c).value = value
+            for c in (5, 6, 7):
+                worksheet.cell(rr, c).number_format = "#,##0"
+        return start_row + 2 + len(items)
+
+    next_row = section(2, "■RS요금제 가이드 위반", rs, i3)
+    rm_start = max(next_row + 2, 17)
+    section(rm_start, "■RM요금제 가이드 위반", rm, i19)
+
+    for col, width in {"B":8, "C":18, "D":48, "E":14, "F":12, "G":16, "I":80}.items():
+        worksheet.column_dimensions[col].width = width
+    worksheet.sheet_view.showGridLines = False
+    return len(rs), len(rm)
+
+
+def _identity(row: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    return (
+        str(row.get("사업자") or "").strip(),
+        str(row.get("요금제") or "").strip(),
+        str(row.get("망정보") or "").strip(),
+        str(row.get("LTE/5G 구분") or "").strip(),
+    )
+
+
+def _write_change_sheet(worksheet, previous_rows: List[Dict[str, Any]], current_rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    """페이백 미포함 기준 전일 대비 신규/삭제/가격·기간 변동을 작성합니다."""
+    from collections import defaultdict
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    prev_map: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    curr_map: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in previous_rows:
+        prev_map[_identity(row)].append(row)
+    for row in current_rows:
+        curr_map[_identity(row)].append(row)
+
+    changes: List[List[Any]] = []
+    stats = {"신규": 0, "삭제": 0, "월요금 인상": 0, "월요금 인하": 0, "기타 변경": 0}
+    all_keys = set(prev_map) | set(curr_map)
+
+    def signature(row):
+        return (row.get("월 요금"), row.get("할인 기간"), row.get("기간 이후 요금"))
+
+    for key in sorted(all_keys):
+        old_list = sorted(prev_map.get(key, []), key=lambda x: str(signature(x)))
+        new_list = sorted(curr_map.get(key, []), key=lambda x: str(signature(x)))
+        common = min(len(old_list), len(new_list))
+        for i in range(common):
+            old, new = old_list[i], new_list[i]
+            if signature(old) == signature(new):
+                continue
+            old_price, new_price = old.get("월 요금"), new.get("월 요금")
+            if isinstance(old_price, (int, float)) and isinstance(new_price, (int, float)) and new_price > old_price:
+                change_type = "월요금 인상"
+            elif isinstance(old_price, (int, float)) and isinstance(new_price, (int, float)) and new_price < old_price:
+                change_type = "월요금 인하"
+            else:
+                change_type = "기타 변경"
+            stats[change_type] += 1
+            changes.append([change_type, *key, old.get("월 요금"), new.get("월 요금"), old.get("할인 기간"), new.get("할인 기간"), old.get("기간 이후 요금"), new.get("기간 이후 요금")])
+        for new in new_list[common:]:
+            stats["신규"] += 1
+            changes.append(["신규", *key, None, new.get("월 요금"), None, new.get("할인 기간"), None, new.get("기간 이후 요금")])
+        for old in old_list[common:]:
+            stats["삭제"] += 1
+            changes.append(["삭제", *key, old.get("월 요금"), None, old.get("할인 기간"), None, old.get("기간 이후 요금"), None])
+
+    _clear_sheet_values(worksheet)
+    headers = ["변동구분", "사업자", "요금제", "망정보", "LTE/5G", "전일 월요금", "금일 월요금", "전일 할인기간", "금일 할인기간", "전일 이후요금", "금일 이후요금"]
+    for c, h in enumerate(headers, 1):
+        worksheet.cell(1, c).value = h
+    for r, values in enumerate(changes, 2):
+        for c, value in enumerate(values, 1):
+            worksheet.cell(r, c).value = value
+    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = f"A1:K{max(worksheet.max_row,1)}"
+    worksheet.sheet_view.showGridLines = False
+    widths = [14,18,48,12,10,14,14,14,14,16,16]
+    from openpyxl.utils import get_column_letter
+    for i,w in enumerate(widths,1): worksheet.column_dimensions[get_column_letter(i)].width=w
+    for row in worksheet.iter_rows(min_row=2):
+        for c in (6,7,8,9,10,11): row[c-1].number_format = "#,##0"
+    return stats
+
+
+def _write_summary_sheet(worksheet, current_rows: List[Dict[str, Any]], ref_map: Dict[str, str], rs_count: int, rm_count: int, change_stats: Dict[str, int]) -> None:
+    from collections import Counter
+    from datetime import datetime
+    from openpyxl.styles import Font, PatternFill
+
+    classified = _classify_rows(current_rows, ref_map)
+    network = Counter(str(r.get("망정보") or "미확인") for r in classified)
+    fee = Counter(str(r.get("요금구분") or "미분류") for r in classified)
+    generation = Counter(str(r.get("LTE/5G 구분") or "미확인") for r in classified)
+
+    _clear_sheet_values(worksheet)
+    rows = [
+        ["모요 요금제 요약 및 통계", None],
+        ["생성시각", datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+        ["기준", "페이백 미포함"],
+        [None, None],
+        ["전체 저장 행", len(classified)],
+        ["RS", fee.get("RS",0)],
+        ["RM", fee.get("RM",0)],
+        ["미분류", fee.get("미분류",0)],
+        ["RS 가이드 위반", rs_count],
+        ["RM 가이드 위반", rm_count],
+        [None, None],
+        ["LG U+망", network.get("LG U+",0)],
+        ["KT망", network.get("KT",0)],
+        ["SKT망", network.get("SKT",0)],
+        ["망정보 미확인", network.get("미확인",0)],
+        ["LTE", generation.get("LTE",0)],
+        ["5G", generation.get("5G",0)],
+        [None, None],
+        ["전일 대비 신규", change_stats.get("신규",0)],
+        ["전일 대비 삭제", change_stats.get("삭제",0)],
+        ["월요금 인상", change_stats.get("월요금 인상",0)],
+        ["월요금 인하", change_stats.get("월요금 인하",0)],
+        ["기타 변경", change_stats.get("기타 변경",0)],
+    ]
+    for r, values in enumerate(rows,1):
+        for c,value in enumerate(values,1): worksheet.cell(r,c).value=value
+    worksheet["A1"].font = Font(bold=True, size=14)
+    worksheet["A1"].fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    for r in range(5, worksheet.max_row+1):
+        worksheet.cell(r,1).font = Font(bold=True)
+    worksheet.column_dimensions["A"].width=24
+    worksheet.column_dimensions["B"].width=24
+    worksheet.sheet_view.showGridLines=False
+
+
 def save_outputs(
     results: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
     errors: List[Dict[str, Any]],
 ) -> None:
-    dataframes: List[Tuple[Dict[str, Any], pd.DataFrame]] = []
+    """기존 엑셀의 참조/가이드 양식을 보존하면서 6개 시트를 자동 갱신합니다."""
+    from openpyxl import Workbook, load_workbook
 
+    dataframes: List[Tuple[Dict[str, Any], pd.DataFrame]] = []
+    result_by_sheet: Dict[str, List[Dict[str, Any]]] = {}
     for config, rows in results:
         df = empty_result_frame(rows)
         dataframes.append((config, df))
-
+        result_by_sheet[config["sheet_name"]] = rows
         csv_path = f"{OUTPUT_PREFIX}_{config['csv_suffix']}.csv"
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
         print(f"CSV [{config['label']}]: {csv_path}")
 
-    # 리스트의 순서가 그대로 엑셀 탭 순서가 됩니다.
-    with pd.ExcelWriter(OUTPUT_XLSX, engine="openpyxl") as writer:
-        for config, df in dataframes:
-            df.to_excel(writer, sheet_name=config["sheet_name"], index=False)
-            format_excel_sheet(writer.book[config["sheet_name"]], df)
+    output_path = Path(OUTPUT_XLSX)
+    previous_rows: List[Dict[str, Any]] = []
+
+    if output_path.exists():
+        workbook = load_workbook(output_path)
+        if "페이백 미포함" in workbook.sheetnames:
+            previous_rows = _sheet_rows_as_dicts(workbook["페이백 미포함"])
+    else:
+        workbook = Workbook()
+        workbook.active.title = "페이백 포함"
+        for name in ["페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "참조"]:
+            workbook.create_sheet(name)
+
+    # 과거 오타 시트명이 있으면 정상 명칭으로 변경합니다.
+    if "오약 및 통계" in workbook.sheetnames and "요약 및 통계" not in workbook.sheetnames:
+        workbook["오약 및 통계"].title = "요약 및 통계"
+
+    for name in ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "참조"]:
+        if name not in workbook.sheetnames:
+            workbook.create_sheet(name)
+
+    # 기존 참조 데이터는 그대로 보존합니다.
+    # 참조 시트가 비어 있는 경우에만 최초 RS 기준값을 복원합니다.
+    _ensure_reference_sheet(workbook)
+    ref_map = _reference_map(workbook)
+
+    for config, df in dataframes:
+        _write_raw_sheet(workbook[config["sheet_name"]], df)
+
+    current_excluded = result_by_sheet.get("페이백 미포함", [])
+    rs_count, rm_count = _write_guide_sheet(workbook["가이드 위반"], current_excluded, ref_map)
+    change_stats = _write_change_sheet(workbook["전일 대비 변동"], previous_rows, current_excluded)
+    _write_summary_sheet(workbook["요약 및 통계"], current_excluded, ref_map, rs_count, rm_count, change_stats)
+
+    # 시트 순서를 고정합니다.
+    desired = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "참조"]
+    workbook._sheets = [workbook[name] for name in desired]
+    workbook.save(output_path)
 
     if errors:
         pd.DataFrame(errors).to_csv(
@@ -575,11 +925,11 @@ def save_outputs(
     print(f"\nXLSX: {OUTPUT_XLSX}")
     for index, (config, df) in enumerate(dataframes, start=1):
         print(f"Sheet{index} [{config['sheet_name']}]: {len(df):,}건")
+    print(f"가이드 위반: RS {rs_count:,}건 / RM {rm_count:,}건")
+    print(f"전일 대비 변동: {sum(change_stats.values()):,}건")
+    print("참조 시트: 기존 내용 보존")
     if errors:
-        print(
-            f"파싱/요청 오류: {len(errors):,}건 - "
-            f"{OUTPUT_PREFIX}_errors.csv 확인"
-        )
+        print(f"파싱/요청 오류: {len(errors):,}건 - {OUTPUT_PREFIX}_errors.csv 확인")
 
 
 def make_page_params(config: Dict[str, Any], page_index: int) -> Dict[str, Any]:
