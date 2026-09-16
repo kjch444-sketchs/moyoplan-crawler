@@ -3,21 +3,17 @@ name: Moyoplan Daily Crawler
 on:
   # ============================================================
   # 매일 한국시간 오전 7시 자동 실행
-  # GitHub Actions cron은 UTC 기준
   # KST 07:00 = UTC 전날 22:00
   # ============================================================
   schedule:
-    - cron: "30 21 * * *"
+    - cron: "0 22 * * *"
 
-  # ============================================================
-  # GitHub Actions 화면에서 수동 실행 가능
-  # ============================================================
+  # 수동 실행
   workflow_dispatch:
 
 
 # ============================================================
-# 예약 실행과 수동 실행이 겹치는 경우 동시 실행 방지
-# 먼저 실행된 작업이 끝난 후 다음 작업 실행
+# 예약/수동 실행 중복 방지
 # ============================================================
 
 concurrency:
@@ -37,7 +33,7 @@ jobs:
     steps:
 
       # ========================================================
-      # 1. GitHub 저장소 가져오기
+      # 1. 저장소 가져오기
       # ========================================================
 
       - name: Checkout repository
@@ -62,7 +58,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+
+          echo "설치된 주요 패키지 확인"
+          python -c "import requests; print('requests:', requests.__version__)"
+          python -c "import bs4; print('beautifulsoup4: OK')"
+          python -c "import pandas; print('pandas:', pandas.__version__)"
+          python -c "import openpyxl; print('openpyxl:', openpyxl.__version__)"
+          python -c "import truststore; print('truststore: OK')"
 
 
       # ========================================================
@@ -76,6 +79,10 @@ jobs:
 
       # ========================================================
       # 5. 모요 크롤링 실행
+      #
+      # 생성 파일:
+      # - moyoplan_parsed_plans.xlsx
+      # - mail_body.html
       # ========================================================
 
       - name: Run Moyoplan crawler
@@ -84,18 +91,23 @@ jobs:
 
 
       # ========================================================
-      # 6. 생성된 Excel 파일 확인
+      # 6. 생성 결과 확인
       # ========================================================
 
-      - name: Check Excel file
+      - name: Check generated files
         run: |
+          echo "===== Excel ====="
           ls -lh moyoplan_parsed_plans.xlsx
 
+          echo "===== Mail HTML ====="
+          ls -lh mail_body.html
+
+          echo "===== Mail HTML size ====="
+          wc -c mail_body.html
+
 
       # ========================================================
-      # 7. GitHub Actions Artifact 저장
-      #
-      # 실행 결과 페이지에서 Excel 다운로드 가능
+      # 7. Excel을 GitHub Actions Artifact로 저장
       # ========================================================
 
       - name: Upload Excel artifact
@@ -108,9 +120,6 @@ jobs:
 
       # ========================================================
       # 8. 최신 Excel 파일을 GitHub 저장소에 반영
-      #
-      # 크롤링 도중 main 브랜치가 변경되더라도
-      # 최신 원격 변경사항을 rebase한 뒤 push
       # ========================================================
 
       - name: Commit Excel result
@@ -129,11 +138,11 @@ jobs:
 
             git commit -m "Update Moyoplan crawling result"
 
-            echo "원격 main 브랜치의 최신 변경사항을 확인합니다."
+            echo "원격 main 브랜치 최신 변경사항 반영"
 
             git pull --rebase origin main
 
-            echo "크롤링 결과를 main 브랜치에 반영합니다."
+            echo "Excel 결과 push"
 
             git push origin HEAD:main
 
@@ -141,38 +150,51 @@ jobs:
 
 
       # ========================================================
-      # 9. Gmail로 Excel 발송
+      # 9. HTML 메일 본문 준비
+      #
+      # Python이 생성한 mail_body.html 전체 내용을
+      # GitHub Actions 환경변수 MAIL_BODY에 저장
+      # ========================================================
+
+      - name: Prepare HTML mail body
+        run: |
+          {
+            echo 'MAIL_BODY<<EOF'
+            cat mail_body.html
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+
+
+      # ========================================================
+      # 10. Gmail 발송
+      #
+      # 본문:
+      # - 요약 및 통계
+      # - RS 가이드 위반
+      # - RM 가이드 위반
+      #
+      # 첨부:
+      # - moyoplan_parsed_plans.xlsx
       # ========================================================
 
       - name: Send Excel by Gmail
         uses: dawidd6/action-send-mail@v18
         with:
+
           server_address: smtp.gmail.com
           server_port: 465
 
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
 
-          subject: "모요 요금제 크롤링 결과"
+          subject: "모요 요금제 Daily Report"
 
           from: ${{ secrets.MAIL_USERNAME }}
 
           to: "kjch444@lguplus.co.kr"
 
-          body: |
-            안녕하세요.
-
-            오늘의 모요 요금제 크롤링이 완료되었습니다.
-
-            실행 시간:
-            ${{ github.run_started_at }}
-
-            크롤링 결과 Excel 파일을 첨부합니다.
-
-            파일명:
-            moyoplan_parsed_plans.xlsx
-
-            이 메일은 자동으로 발송되었습니다.
+          html_body: ${{ env.MAIL_BODY }}
 
           attachments: moyoplan_parsed_plans.xlsx
 
