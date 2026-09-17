@@ -635,47 +635,68 @@ def _clear_sheet_values(worksheet) -> None:
 
 
 def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
-    """마스터 Excel의 Sheet1/2에서 A:J 데이터만 교체하고 K열 수식은 마스터 K2를 복사합니다."""
+    """마스터 Sheet1/2의 양식/수식은 유지하고 A:J 크롤링 데이터만 갱신합니다.
+
+    K열은 마스터의 K2 일반 수식을 행별로 번역해서 복사합니다.
+    ArrayFormula로 변환하지 않으므로 Excel의 XLOOKUP 등 최신 수식을 훼손하지 않습니다.
+    """
     from copy import copy
     from openpyxl.formula.translate import Translator
-    from openpyxl.worksheet.formula import ArrayFormula
 
-    k2 = worksheet["K2"].value
-    if isinstance(k2, ArrayFormula):
-        k2_formula = k2.text
-    elif isinstance(k2, str) and k2.startswith("="):
-        k2_formula = k2
-    else:
-        raise RuntimeError(f"[{worksheet.title}] 마스터 K2 수식이 없습니다.")
+    # 마스터 K2 수식이 source of truth
+    k2_formula = worksheet["K2"].value
+    if not (isinstance(k2_formula, str) and k2_formula.startswith("=")):
+        raise RuntimeError(
+            f"[{worksheet.title}] K2가 일반 Excel 수식이 아닙니다. "
+            "GitHub의 마스터 Excel K2 수식을 확인하세요."
+        )
 
-    # 2행 서식을 신규 데이터 행에 그대로 복사
-    styles = {}
-    for c in range(1, 12):
-        cell = worksheet.cell(2, c)
-        styles[c] = (copy(cell.font), copy(cell.fill), copy(cell.border),
-                     copy(cell.alignment), cell.number_format, copy(cell.protection))
+    # 2행의 서식을 신규 데이터 행에 복사
+    style_template = {}
+    if worksheet.max_row >= 2:
+        for c in range(1, 12):
+            cell = worksheet.cell(2, c)
+            style_template[c] = {
+                "font": copy(cell.font),
+                "fill": copy(cell.fill),
+                "border": copy(cell.border),
+                "alignment": copy(cell.alignment),
+                "number_format": cell.number_format,
+                "protection": copy(cell.protection),
+            }
 
-    # 기존 원본 데이터와 K열 결과만 지움. 시트/열너비/필터 등은 유지.
-    old_last = max(worksheet.max_row, 2)
-    for r in range(2, old_last + 1):
+    # 기존 데이터/수식 값만 삭제. 시트, 열너비, 조건부서식 등은 유지.
+    old_last_row = max(worksheet.max_row, 2)
+    for r in range(2, old_last_row + 1):
         for c in range(1, 12):
             worksheet.cell(r, c).value = None
 
-    for r_idx, row in enumerate(dataframe.itertuples(index=False, name=None), 2):
-        for c_idx, value in enumerate(row, 1):
-            worksheet.cell(r_idx, c_idx).value = None if pd.isna(value) else value
+    # 오늘 크롤링 A:J 작성 + K 수식 복사
+    for r_idx, row in enumerate(dataframe.itertuples(index=False, name=None), start=2):
+        for c_idx, value in enumerate(row, start=1):
+            if pd.isna(value):
+                value = None
+            worksheet.cell(r_idx, c_idx).value = value
 
-        translated = Translator(k2_formula, origin="K2").translate_formula(f"K{r_idx}")
-        worksheet.cell(r_idx, 11).value = ArrayFormula(ref=f"K{r_idx}", text=translated)
+        worksheet.cell(r_idx, 11).value = Translator(
+            k2_formula, origin="K2"
+        ).translate_formula(f"K{r_idx}")
 
-        for c in range(1, 12):
-            target = worksheet.cell(r_idx, c)
-            font, fill, border, alignment, numfmt, protection = styles[c]
-            target.font = copy(font); target.fill = copy(fill); target.border = copy(border)
-            target.alignment = copy(alignment); target.number_format = numfmt
-            target.protection = copy(protection)
+        if style_template:
+            for c in range(1, 12):
+                target = worksheet.cell(r_idx, c)
+                st = style_template[c]
+                target.font = copy(st["font"])
+                target.fill = copy(st["fill"])
+                target.border = copy(st["border"])
+                target.alignment = copy(st["alignment"])
+                target.number_format = st["number_format"]
+                target.protection = copy(st["protection"])
 
-    worksheet.auto_filter.ref = f"A1:K{max(2, len(dataframe)+1)}"
+    last_row = max(2, len(dataframe) + 1)
+    worksheet.auto_filter.ref = f"A1:K{last_row}"
+    if not worksheet.freeze_panes:
+        worksheet.freeze_panes = "A2"
 
 
 
@@ -1115,48 +1136,6 @@ def generate_mail_body(
 
 
 
-def _refresh_moyo_price_formula_ranges(workbook, current_last_row: int) -> None:
-    """모요 판가 시트의 사용자가 만든 수식은 그대로 보존하고 원본 범위 끝행만 갱신합니다."""
-    if "모요 판가" not in workbook.sheetnames:
-        return
-
-    from openpyxl.worksheet.formula import ArrayFormula
-
-    ws = workbook["모요 판가"]
-    pattern = re.compile(
-        r"('페이백 미포함'!\$A\$2:\$K\$)(\d+)"
-    )
-    changed = 0
-
-    for row in ws.iter_rows():
-        for cell in row:
-            value = cell.value
-            if isinstance(value, ArrayFormula):
-                original = value.text
-                updated = pattern.sub(
-                    lambda m: f"{m.group(1)}{current_last_row}",
-                    original,
-                )
-                if updated != original:
-                    cell.value = ArrayFormula(ref=value.ref, text=updated)
-                    changed += 1
-            elif isinstance(value, str) and value.startswith("="):
-                updated = pattern.sub(
-                    lambda m: f"{m.group(1)}{current_last_row}",
-                    value,
-                )
-                if updated != value:
-                    cell.value = updated
-                    changed += 1
-
-    print(
-        f"모요 판가: 사용자 수식 보존 / 페이백 미포함 참조범위 "
-        f"A2:K{current_last_row}로 갱신 ({changed}개 수식)",
-        flush=True,
-    )
-
-
-
 def save_outputs(
     results: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
     errors: List[Dict[str, Any]],
@@ -1180,20 +1159,22 @@ def save_outputs(
     if not output_path.exists():
         raise FileNotFoundError(
             f"마스터 Excel이 없습니다: {OUTPUT_XLSX}. "
-            "GitHub 저장소 루트에 사용자가 작성한 파일을 먼저 올려주세요."
+            "GitHub 저장소 루트에 마스터 파일을 먼저 올려주세요."
         )
 
     workbook = load_workbook(output_path)
-    required = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동",
-                "요약 및 통계", "모요 판가", "참조"]
-    missing = [name for name in required if name not in workbook.sheetnames]
+    required_sheets = [
+        "페이백 포함", "페이백 미포함", "가이드 위반",
+        "전일 대비 변동", "요약 및 통계", "모요 판가", "참조",
+    ]
+    missing = [s for s in required_sheets if s not in workbook.sheetnames]
     if missing:
         raise RuntimeError("마스터 Excel 누락 시트: " + ", ".join(missing))
 
-    # 기존 Sheet2는 오늘 데이터로 덮기 전에 전일 비교용으로 메모리에 보관
+    # 오늘 데이터로 덮기 전에 Sheet2를 전일 데이터로 확보
     previous_rows = _sheet_rows_as_dicts(workbook["페이백 미포함"])
 
-    # 참조는 사용자가 관리하는 마스터 데이터. Python은 수정하지 않음.
+    # 참조 시트는 사용자가 관리합니다. Python은 읽기만 합니다.
     ref_map = _reference_map(workbook)
 
     for config, df in dataframes:
@@ -1201,22 +1182,12 @@ def save_outputs(
 
     current_excluded = result_by_sheet.get("페이백 미포함", [])
 
-    # Sheet6 모요 판가의 기존 값/서식/수식은 그대로 두고,
-    # 페이백 미포함 데이터 행수에 맞춰 수식의 원본 범위만 갱신합니다.
-    current_last_row = max(2, workbook["페이백 미포함"].max_row)
-    _refresh_moyo_price_formula_ranges(workbook, current_last_row)
-
+    # 모요 판가 시트는 값/수식/서식을 전혀 수정하지 않습니다.
     rs_count, rm_count = _write_guide_sheet(workbook["가이드 위반"], current_excluded, ref_map)
     change_stats = _write_change_sheet(workbook["전일 대비 변동"], previous_rows, current_excluded)
     _write_summary_sheet(workbook["요약 및 통계"], current_excluded, ref_map, rs_count, rm_count, change_stats)
 
-    # 마스터의 시트 순서와 추가 시트는 그대로 보존합니다.
-
-    # 당일 크롤링 데이터로 메일의 모요 판가를 계산합니다.
-    generate_mail_body(
-        workbook, current_excluded, ref_map, rs_count, rm_count, change_stats
-    )
-
+    # 마스터의 기존 시트 순서/수식/서식을 유지한 채 저장합니다.
     workbook.save(output_path)
 
     if errors:
