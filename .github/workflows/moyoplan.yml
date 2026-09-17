@@ -188,7 +188,7 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
 
-          subject: "모요 요금제 Daily Report"
+          subject: "모요 요금제 Daily Report (${{ env.REPORT_DATE }})"
 
           from: ${{ secrets.MAIL_USERNAME }}
 
