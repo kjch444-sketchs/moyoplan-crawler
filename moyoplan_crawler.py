@@ -637,6 +637,7 @@ def _clear_sheet_values(worksheet) -> None:
 def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
     """원본 10개 컬럼 + K열 데이터/음성/문자 3조건 요금구분 수식을 작성합니다."""
     from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.worksheet.formula import ArrayFormula
 
     if worksheet.max_row:
         worksheet.delete_rows(1, worksheet.max_row)
@@ -650,13 +651,19 @@ def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
             if pd.isna(value):
                 value = None
             worksheet.cell(r_idx, c_idx).value = value
-        # 참조 B(데이터)+D(음성)+E(문자)가 모두 일치할 때만 C(요금구분)를 가져옵니다.
-        # 참조에 없는 조합은 빈칸으로 둡니다.
-        worksheet.cell(r_idx, 11).value = (
-            f'=IFERROR(LOOKUP(2,1/((참조!$B$2:$B$1000=$E{r_idx})*'
-            f'(참조!$D$2:$D$1000=$C{r_idx})*'
-            f'(참조!$E$2:$E$1000=$D{r_idx})),참조!$C$2:$C$1000),"")'
+        # 사용자가 작성한 기준과 동일:
+        # 데이터(E열) + 음성(C열) + 문자(D열)가 참조 B/D/E와 모두 일치해야 요금구분 반환.
+        # 일치하지 않으면 빈칸.
+        last_ref_row = max(2, worksheet.parent["참조"].max_row)
+        formula = (
+            f'=XLOOKUP(1,'
+            f'(참조!$B$2:$B${last_ref_row}=E{r_idx})*'
+            f'(참조!$D$2:$D${last_ref_row}=C{r_idx})*'
+            f'(참조!$E$2:$E${last_ref_row}=D{r_idx}),'
+            f'참조!$C$2:$C${last_ref_row},"")'
         )
+        worksheet.cell(r_idx, 11).value = ArrayFormula(ref=f"K{r_idx}", text=formula)
+
 
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = f"A1:K{max(worksheet.max_row, 1)}"
@@ -1114,6 +1121,49 @@ def generate_mail_body(
     print("메일 본문 HTML: mail_body.html")
 
 
+
+def _refresh_moyo_price_formula_ranges(workbook, current_last_row: int) -> None:
+    """모요 판가 시트의 사용자가 만든 수식은 그대로 보존하고 원본 범위 끝행만 갱신합니다."""
+    if "모요 판가" not in workbook.sheetnames:
+        return
+
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    ws = workbook["모요 판가"]
+    pattern = re.compile(
+        r"('페이백 미포함'!\$A\$2:\$K\$)(\d+)"
+    )
+    changed = 0
+
+    for row in ws.iter_rows():
+        for cell in row:
+            value = cell.value
+            if isinstance(value, ArrayFormula):
+                original = value.text
+                updated = pattern.sub(
+                    lambda m: f"{m.group(1)}{current_last_row}",
+                    original,
+                )
+                if updated != original:
+                    cell.value = ArrayFormula(ref=value.ref, text=updated)
+                    changed += 1
+            elif isinstance(value, str) and value.startswith("="):
+                updated = pattern.sub(
+                    lambda m: f"{m.group(1)}{current_last_row}",
+                    value,
+                )
+                if updated != value:
+                    cell.value = updated
+                    changed += 1
+
+    print(
+        f"모요 판가: 사용자 수식 보존 / 페이백 미포함 참조범위 "
+        f"A2:K{current_last_row}로 갱신 ({changed}개 수식)",
+        flush=True,
+    )
+
+
+
 def save_outputs(
     results: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
     errors: List[Dict[str, Any]],
@@ -1161,6 +1211,12 @@ def save_outputs(
         _write_raw_sheet(workbook[config["sheet_name"]], df)
 
     current_excluded = result_by_sheet.get("페이백 미포함", [])
+
+    # Sheet6 모요 판가의 기존 값/서식/수식은 그대로 두고,
+    # 페이백 미포함 데이터 행수에 맞춰 수식의 원본 범위만 갱신합니다.
+    current_last_row = max(2, workbook["페이백 미포함"].max_row)
+    _refresh_moyo_price_formula_ranges(workbook, current_last_row)
+
     rs_count, rm_count = _write_guide_sheet(workbook["가이드 위반"], current_excluded, ref_map)
     change_stats = _write_change_sheet(workbook["전일 대비 변동"], previous_rows, current_excluded)
     _write_summary_sheet(workbook["요약 및 통계"], current_excluded, ref_map, rs_count, rm_count, change_stats)
