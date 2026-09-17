@@ -588,17 +588,29 @@ def _ensure_reference_sheet(workbook) -> None:
         ws.cell(r, 3).value = fee_type
 
 
-def _reference_map(workbook) -> Dict[str, str]:
-    """참조 시트 B:C를 읽어 데이터 제공량 -> 요금구분 매핑을 만듭니다."""
+def _reference_map(workbook) -> Dict[Tuple[str, str, str], str]:
+    """참조 시트 B:E를 읽어 (데이터, 음성, 문자) -> 요금구분 매핑을 만듭니다."""
     if "참조" not in workbook.sheetnames:
         return {}
     ws = workbook["참조"]
-    result: Dict[str, str] = {}
+    result: Dict[Tuple[str, str, str], str] = {}
     for row in range(2, ws.max_row + 1):
-        data_amount = ws.cell(row, 2).value
-        fee_type = ws.cell(row, 3).value
-        if data_amount not in (None, "") and fee_type not in (None, ""):
-            result[str(data_amount).strip()] = str(fee_type).strip()
+        data_amount = ws.cell(row, 2).value   # B: 모태/데이터
+        fee_type = ws.cell(row, 3).value      # C: 구분
+        voice = ws.cell(row, 4).value         # D: 음성
+        sms = ws.cell(row, 5).value           # E: 문자
+        if (
+            data_amount not in (None, "")
+            and fee_type not in (None, "")
+            and voice not in (None, "")
+            and sms not in (None, "")
+        ):
+            key = (
+                str(data_amount).strip(),
+                str(voice).strip(),
+                str(sms).strip(),
+            )
+            result[key] = str(fee_type).strip()
     return result
 
 
@@ -623,7 +635,7 @@ def _clear_sheet_values(worksheet) -> None:
 
 
 def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
-    """원본 10개 컬럼 + K열 VLOOKUP 요금구분을 작성합니다."""
+    """원본 10개 컬럼 + K열 데이터/음성/문자 3조건 요금구분 수식을 작성합니다."""
     from openpyxl.styles import Alignment, Font, PatternFill
 
     if worksheet.max_row:
@@ -638,9 +650,12 @@ def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
             if pd.isna(value):
                 value = None
             worksheet.cell(r_idx, c_idx).value = value
-        # 참조에 없는 데이터는 빈칸. 참조 시트에 RS/RM을 추가하면 자동 반영됩니다.
+        # 참조 B(데이터)+D(음성)+E(문자)가 모두 일치할 때만 C(요금구분)를 가져옵니다.
+        # 참조에 없는 조합은 빈칸으로 둡니다.
         worksheet.cell(r_idx, 11).value = (
-            f'=IFERROR(VLOOKUP($E{r_idx},참조!$B:$C,2,0),"")'
+            f'=IFERROR(LOOKUP(2,1/((참조!$B$2:$B$1000=$E{r_idx})*'
+            f'(참조!$D$2:$D$1000=$C{r_idx})*'
+            f'(참조!$E$2:$E$1000=$D{r_idx})),참조!$C$2:$C$1000),"")'
         )
 
     worksheet.freeze_panes = "A2"
@@ -664,16 +679,25 @@ def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
             row[col - 1].number_format = "#,##0"
 
 
-def _classify_rows(rows: List[Dict[str, Any]], ref_map: Dict[str, str]) -> List[Dict[str, Any]]:
+def _classify_rows(
+    rows: List[Dict[str, Any]],
+    ref_map: Dict[Tuple[str, str, str], str],
+) -> List[Dict[str, Any]]:
+    """엑셀 K열과 동일하게 데이터+음성+문자 3개 조건으로 요금구분을 판정합니다."""
     classified = []
     for row in rows:
         item = dict(row)
-        item["요금구분"] = ref_map.get(str(item.get("데이터 제공량") or "").strip(), "")
+        key = (
+            str(item.get("데이터 제공량") or "").strip(),
+            str(item.get("통화제공량") or "").strip(),
+            str(item.get("문자제공량") or "").strip(),
+        )
+        item["요금구분"] = ref_map.get(key, "")
         classified.append(item)
     return classified
 
 
-def _write_guide_sheet(worksheet, current_rows: List[Dict[str, Any]], ref_map: Dict[str, str]) -> Tuple[int, int]:
+def _write_guide_sheet(worksheet, current_rows: List[Dict[str, Any]], ref_map: Dict[Tuple[str, str, str], str]) -> Tuple[int, int]:
     """I3/I19에 적어둔 기준으로 RS/RM 가이드 위반을 자동 작성합니다."""
     from copy import copy
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -815,7 +839,7 @@ def _write_change_sheet(worksheet, previous_rows: List[Dict[str, Any]], current_
     return stats
 
 
-def _write_summary_sheet(worksheet, current_rows: List[Dict[str, Any]], ref_map: Dict[str, str], rs_count: int, rm_count: int, change_stats: Dict[str, int]) -> None:
+def _write_summary_sheet(worksheet, current_rows: List[Dict[str, Any]], ref_map: Dict[Tuple[str, str, str], str], rs_count: int, rm_count: int, change_stats: Dict[str, int]) -> None:
     from collections import Counter
     from datetime import datetime
     from openpyxl.styles import Font, PatternFill
@@ -895,7 +919,7 @@ def _mail_html_table(title: str, headers: List[str], rows: List[List[Any]]) -> s
 
 def generate_mail_body(
     current_rows: List[Dict[str, Any]],
-    ref_map: Dict[str, str],
+    ref_map: Dict[Tuple[str, str, str], str],
     rs_count: int,
     rm_count: int,
     change_stats: Dict[str, int],
@@ -995,14 +1019,14 @@ def save_outputs(
     else:
         workbook = Workbook()
         workbook.active.title = "페이백 포함"
-        for name in ["페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "참조"]:
+        for name in ["페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "모요 판가", "참조"]:
             workbook.create_sheet(name)
 
     # 과거 오타 시트명이 있으면 정상 명칭으로 변경합니다.
     if "오약 및 통계" in workbook.sheetnames and "요약 및 통계" not in workbook.sheetnames:
         workbook["오약 및 통계"].title = "요약 및 통계"
 
-    for name in ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "참조"]:
+    for name in ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "모요 판가", "참조"]:
         if name not in workbook.sheetnames:
             workbook.create_sheet(name)
 
@@ -1020,7 +1044,8 @@ def save_outputs(
     _write_summary_sheet(workbook["요약 및 통계"], current_excluded, ref_map, rs_count, rm_count, change_stats)
 
     # 시트 순서를 고정합니다.
-    desired = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "참조"]
+    # 모요 판가 시트는 사용자가 작성한 값/수식/서식을 수정하지 않고 그대로 보존합니다.
+    desired = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "모요 판가", "참조"]
     workbook._sheets = [workbook[name] for name in desired]
     workbook.save(output_path)
     generate_mail_body(current_excluded, ref_map, rs_count, rm_count, change_stats)
