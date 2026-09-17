@@ -1,160 +1,92 @@
 name: Moyoplan Daily Crawler
 
 on:
-  # ============================================================
   # 매일 한국시간 오전 7시 자동 실행
   # KST 07:00 = UTC 전날 22:00
-  # ============================================================
   schedule:
     - cron: "0 22 * * *"
 
-  # 수동 실행
+  # GitHub Actions 화면에서 수동 실행 가능
   workflow_dispatch:
-
-
-# ============================================================
-# 예약/수동 실행 중복 방지
-# ============================================================
 
 concurrency:
   group: moyoplan-daily-crawler
   cancel-in-progress: false
 
-
 jobs:
-
   crawl:
-
     runs-on: ubuntu-latest
 
     permissions:
       contents: write
 
     steps:
-
-      # ========================================================
-      # 1. 저장소 가져오기
-      # ========================================================
-
       - name: Checkout repository
-        uses: actions/checkout@v7
-
-
-      # ========================================================
-      # 2. Python 설치
-      # ========================================================
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
-
-
-      # ========================================================
-      # 3. Python 패키지 설치
-      # ========================================================
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-          echo "설치된 주요 패키지 확인"
+          echo "===== Package check ====="
           python -c "import requests; print('requests:', requests.__version__)"
           python -c "import bs4; print('beautifulsoup4: OK')"
           python -c "import pandas; print('pandas:', pandas.__version__)"
           python -c "import openpyxl; print('openpyxl:', openpyxl.__version__)"
           python -c "import truststore; print('truststore: OK')"
 
-
-      # ========================================================
-      # 4. Chrome 확인
-      # ========================================================
-
       - name: Check Chrome
         run: |
           google-chrome --version || true
 
-
-      # ========================================================
-      # 5. 모요 크롤링 실행
-      #
-      # 생성 파일:
-      # - moyoplan_parsed_plans.xlsx
-      # - mail_body.html
-      # ========================================================
-
       - name: Run Moyoplan crawler
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
-          python moyoplan_crawler.py
-
-
-      # ========================================================
-      # 6. 생성 결과 확인
-      # ========================================================
+          python -u moyoplan_crawler.py
 
       - name: Check generated files
         run: |
           echo "===== Excel ====="
+          test -s moyoplan_parsed_plans.xlsx
           ls -lh moyoplan_parsed_plans.xlsx
 
           echo "===== Mail HTML ====="
+          test -s mail_body.html
           ls -lh mail_body.html
-
-          echo "===== Mail HTML size ====="
           wc -c mail_body.html
 
-
-      # ========================================================
-      # 7. Excel을 GitHub Actions Artifact로 저장
-      # ========================================================
-
       - name: Upload Excel artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: moyoplan-parsed-plans
           path: moyoplan_parsed_plans.xlsx
           retention-days: 30
-
-
-      # ========================================================
-      # 8. 최신 Excel 파일을 GitHub 저장소에 반영
-      # ========================================================
+          if-no-files-found: error
 
       - name: Commit Excel result
         run: |
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add moyoplan_parsed_plans.xlsx
 
           if git diff --cached --quiet; then
-
             echo "변경된 Excel 파일이 없습니다."
-
           else
-
             git commit -m "Update Moyoplan crawling result"
-
-            echo "원격 main 브랜치 최신 변경사항 반영"
-
             git pull --rebase origin main
-
-            echo "Excel 결과 push"
-
             git push origin HEAD:main
-
           fi
-
-
-      # ========================================================
-      # 9. HTML 메일 본문 준비
-      #
-      # Python이 생성한 mail_body.html 전체 내용을
-      # GitHub Actions 환경변수 MAIL_BODY에 저장
-      # ========================================================
 
       - name: Prepare HTML mail body
         run: |
@@ -165,23 +97,13 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_ENV"
 
-
-      # ========================================================
-      # 10. Gmail 발송
-      #
-      # 본문:
-      # - 요약 및 통계
-      # - RS 가이드 위반
-      # - RM 가이드 위반
-      #
-      # 첨부:
-      # - moyoplan_parsed_plans.xlsx
-      # ========================================================
+      - name: Set KST report date
+        run: |
+          echo "REPORT_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')" >> "$GITHUB_ENV"
 
       - name: Send Excel by Gmail
         uses: dawidd6/action-send-mail@v18
         with:
-
           server_address: smtp.gmail.com
           server_port: 465
 
@@ -192,7 +114,7 @@ jobs:
 
           from: ${{ secrets.MAIL_USERNAME }}
 
-          to: "kjch444@lguplus.co.kr"
+          to: "kjch444@lguplus.co.kr, junghoonchoi@lguplus.co.kr, ydythetop@lguplus.co.kr"
 
           html_body: ${{ env.MAIL_BODY }}
 
