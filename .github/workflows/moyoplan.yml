@@ -114,7 +114,7 @@ jobs:
 
           from: ${{ secrets.MAIL_USERNAME }}
 
-          to: "kjch444@lguplus.co.kr, junghoonchoi@lguplus.co.kr, ydythetop@lguplus.co.kr"
+          to: "kjch444@lguplus.co.kr"
 
           html_body: ${{ env.MAIL_BODY }}
 
