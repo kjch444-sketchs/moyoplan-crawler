@@ -635,55 +635,48 @@ def _clear_sheet_values(worksheet) -> None:
 
 
 def _write_raw_sheet(worksheet, dataframe: pd.DataFrame) -> None:
-    """원본 10개 컬럼 + K열 데이터/음성/문자 3조건 요금구분 수식을 작성합니다."""
-    from openpyxl.styles import Alignment, Font, PatternFill
+    """마스터 Excel의 Sheet1/2에서 A:J 데이터만 교체하고 K열 수식은 마스터 K2를 복사합니다."""
+    from copy import copy
+    from openpyxl.formula.translate import Translator
     from openpyxl.worksheet.formula import ArrayFormula
 
-    if worksheet.max_row:
-        worksheet.delete_rows(1, worksheet.max_row)
+    k2 = worksheet["K2"].value
+    if isinstance(k2, ArrayFormula):
+        k2_formula = k2.text
+    elif isinstance(k2, str) and k2.startswith("="):
+        k2_formula = k2
+    else:
+        raise RuntimeError(f"[{worksheet.title}] 마스터 K2 수식이 없습니다.")
 
-    headers = list(dataframe.columns) + ["요금구분"]
-    for col, value in enumerate(headers, 1):
-        worksheet.cell(1, col).value = value
+    # 2행 서식을 신규 데이터 행에 그대로 복사
+    styles = {}
+    for c in range(1, 12):
+        cell = worksheet.cell(2, c)
+        styles[c] = (copy(cell.font), copy(cell.fill), copy(cell.border),
+                     copy(cell.alignment), cell.number_format, copy(cell.protection))
+
+    # 기존 원본 데이터와 K열 결과만 지움. 시트/열너비/필터 등은 유지.
+    old_last = max(worksheet.max_row, 2)
+    for r in range(2, old_last + 1):
+        for c in range(1, 12):
+            worksheet.cell(r, c).value = None
 
     for r_idx, row in enumerate(dataframe.itertuples(index=False, name=None), 2):
         for c_idx, value in enumerate(row, 1):
-            if pd.isna(value):
-                value = None
-            worksheet.cell(r_idx, c_idx).value = value
-        # 사용자가 작성한 기준과 동일:
-        # 데이터(E열) + 음성(C열) + 문자(D열)가 참조 B/D/E와 모두 일치해야 요금구분 반환.
-        # 일치하지 않으면 빈칸.
-        last_ref_row = max(2, worksheet.parent["참조"].max_row)
-        formula = (
-            f'=XLOOKUP(1,'
-            f'(참조!$B$2:$B${last_ref_row}=E{r_idx})*'
-            f'(참조!$D$2:$D${last_ref_row}=C{r_idx})*'
-            f'(참조!$E$2:$E${last_ref_row}=D{r_idx}),'
-            f'참조!$C$2:$C${last_ref_row},"")'
-        )
-        worksheet.cell(r_idx, 11).value = ArrayFormula(ref=f"K{r_idx}", text=formula)
+            worksheet.cell(r_idx, c_idx).value = None if pd.isna(value) else value
 
+        translated = Translator(k2_formula, origin="K2").translate_formula(f"K{r_idx}")
+        worksheet.cell(r_idx, 11).value = ArrayFormula(ref=f"K{r_idx}", text=translated)
 
-    worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = f"A1:K{max(worksheet.max_row, 1)}"
-    worksheet.sheet_view.showGridLines = False
-    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
-    for cell in worksheet[1]:
-        cell.font = Font(bold=True)
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        for c in range(1, 12):
+            target = worksheet.cell(r_idx, c)
+            font, fill, border, alignment, numfmt, protection = styles[c]
+            target.font = copy(font); target.fill = copy(fill); target.border = copy(border)
+            target.alignment = copy(alignment); target.number_format = numfmt
+            target.protection = copy(protection)
 
-    widths = [18, 42, 14, 14, 30, 12, 13, 14, 12, 16, 12]
-    for idx, width in enumerate(widths, 1):
-        from openpyxl.utils import get_column_letter
-        worksheet.column_dimensions[get_column_letter(idx)].width = width
+    worksheet.auto_filter.ref = f"A1:K{max(2, len(dataframe)+1)}"
 
-    for row in worksheet.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="center")
-        for col in (8, 9, 10):
-            row[col - 1].number_format = "#,##0"
 
 
 def _classify_rows(
@@ -1184,27 +1177,23 @@ def save_outputs(
     output_path = Path(OUTPUT_XLSX)
     previous_rows: List[Dict[str, Any]] = []
 
-    if output_path.exists():
-        workbook = load_workbook(output_path)
-        if "페이백 미포함" in workbook.sheetnames:
-            previous_rows = _sheet_rows_as_dicts(workbook["페이백 미포함"])
-    else:
-        workbook = Workbook()
-        workbook.active.title = "페이백 포함"
-        for name in ["페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "모요 판가", "참조"]:
-            workbook.create_sheet(name)
+    if not output_path.exists():
+        raise FileNotFoundError(
+            f"마스터 Excel이 없습니다: {OUTPUT_XLSX}. "
+            "GitHub 저장소 루트에 사용자가 작성한 파일을 먼저 올려주세요."
+        )
 
-    # 과거 오타 시트명이 있으면 정상 명칭으로 변경합니다.
-    if "오약 및 통계" in workbook.sheetnames and "요약 및 통계" not in workbook.sheetnames:
-        workbook["오약 및 통계"].title = "요약 및 통계"
+    workbook = load_workbook(output_path)
+    required = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동",
+                "요약 및 통계", "모요 판가", "참조"]
+    missing = [name for name in required if name not in workbook.sheetnames]
+    if missing:
+        raise RuntimeError("마스터 Excel 누락 시트: " + ", ".join(missing))
 
-    for name in ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "모요 판가", "참조"]:
-        if name not in workbook.sheetnames:
-            workbook.create_sheet(name)
+    # 기존 Sheet2는 오늘 데이터로 덮기 전에 전일 비교용으로 메모리에 보관
+    previous_rows = _sheet_rows_as_dicts(workbook["페이백 미포함"])
 
-    # 기존 참조 데이터는 그대로 보존합니다.
-    # 참조 시트가 비어 있는 경우에만 최초 RS 기준값을 복원합니다.
-    _ensure_reference_sheet(workbook)
+    # 참조는 사용자가 관리하는 마스터 데이터. Python은 수정하지 않음.
     ref_map = _reference_map(workbook)
 
     for config, df in dataframes:
@@ -1221,10 +1210,7 @@ def save_outputs(
     change_stats = _write_change_sheet(workbook["전일 대비 변동"], previous_rows, current_excluded)
     _write_summary_sheet(workbook["요약 및 통계"], current_excluded, ref_map, rs_count, rm_count, change_stats)
 
-    # 시트 순서를 고정합니다.
-    # 모요 판가 시트는 사용자가 작성한 값/수식/서식을 수정하지 않고 그대로 보존합니다.
-    desired = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "모요 판가", "참조"]
-    workbook._sheets = [workbook[name] for name in desired]
+    # 마스터의 시트 순서와 추가 시트는 그대로 보존합니다.
 
     # 당일 크롤링 데이터로 메일의 모요 판가를 계산합니다.
     generate_mail_body(
