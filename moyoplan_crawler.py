@@ -917,14 +917,130 @@ def _mail_html_table(title: str, headers: List[str], rows: List[List[Any]]) -> s
     return ''.join(parts)
 
 
+def _build_moyo_price_mail_rows(
+    workbook,
+    current_rows: List[Dict[str, Any]],
+    ref_map: Dict[Tuple[str, str, str], str],
+) -> Tuple[List[str], List[List[Any]]]:
+    """모요 판가 시트 수식과 같은 조건으로 당일 메일용 판가표를 계산합니다."""
+    if "모요 판가" not in workbook.sheetnames or "참조" not in workbook.sheetnames:
+        return [], []
+
+    price_ws = workbook["모요 판가"]
+    ref_ws = workbook["참조"]
+
+    category_map: Dict[str, Tuple[str, str, str]] = {}
+    for r in range(2, ref_ws.max_row + 1):
+        key = ref_ws.cell(r, 6).value
+        data = ref_ws.cell(r, 2).value
+        voice = ref_ws.cell(r, 4).value
+        sms = ref_ws.cell(r, 5).value
+        if key not in (None, "") and data not in (None, ""):
+            category_map[str(key).strip()] = (
+                str(data).strip(),
+                str(voice or "").strip(),
+                str(sms or "").strip(),
+            )
+
+    business_map: Dict[str, str] = {}
+    for r in range(2, ref_ws.max_row + 1):
+        canonical = ref_ws.cell(r, 11).value
+        moyo = ref_ws.cell(r, 12).value
+        fallback = ref_ws.cell(r, 13).value
+        if canonical not in (None, ""):
+            mapped = moyo if moyo not in (None, "") else fallback
+            if mapped not in (None, ""):
+                business_map[str(canonical).strip()] = str(mapped).strip()
+
+    classified = _classify_rows(current_rows, ref_map)
+    category_cols = [4, 7, 10, 13, 16, 19, 22, 25]
+    headers = ["사업자", "망"]
+    categories = []
+
+    for col in category_cols:
+        title = price_ws.cell(3, col).value
+        if title in (None, ""):
+            continue
+        title_text = str(title).strip()
+        criteria = category_map.get(title_text.replace("GB", "G"))
+        if not criteria:
+            continue
+        categories.append((title_text, criteria))
+        headers.extend([
+            f"{title_text} 월 요금",
+            f"{title_text} 할인 기간",
+            f"{title_text} 기간 이후 요금",
+        ])
+
+    result_rows: List[List[Any]] = []
+    previous_business = ""
+
+    for r in range(5, price_ws.max_row + 1):
+        raw_business = price_ws.cell(r, 2).value
+        network = price_ws.cell(r, 3).value
+        if network in (None, ""):
+            continue
+
+        if isinstance(raw_business, str) and raw_business.startswith("="):
+            business_label = previous_business
+        elif raw_business not in (None, ""):
+            business_label = str(raw_business).strip()
+            previous_business = business_label
+        else:
+            business_label = previous_business
+
+        if not business_label:
+            continue
+
+        target_business = business_map.get(business_label, business_label)
+        network_text = str(network).strip()
+        target_network = "SKT" if network_text in {"SK", "SKT"} else network_text
+        output: List[Any] = [business_label, network_text]
+
+        for _, (data_amount, voice, sms) in categories:
+            candidates = [
+                item for item in classified
+                if str(item.get("사업자") or "").strip() == target_business
+                and str(item.get("통화제공량") or "").strip() == voice
+                and str(item.get("문자제공량") or "").strip() == sms
+                and str(item.get("데이터 제공량") or "").strip() == data_amount
+                and str(item.get("망정보") or "").strip() == target_network
+                and str(item.get("요금구분") or "").strip().upper() == "RS"
+            ]
+
+            if candidates:
+                def sort_key(item: Dict[str, Any]):
+                    price = item.get("월 요금")
+                    months = item.get("할인 기간")
+                    after = item.get("기간 이후 요금")
+                    price_key = price if isinstance(price, (int, float)) else 10**18
+                    months_key = months if isinstance(months, (int, float)) else 10**18
+                    after_key = after if isinstance(after, (int, float)) else 0
+                    return (price_key, -months_key, after_key)
+
+                best = sorted(candidates, key=sort_key)[0]
+                output.extend([
+                    best.get("월 요금"),
+                    best.get("할인 기간"),
+                    best.get("기간 이후 요금"),
+                ])
+            else:
+                output.extend(["", "", ""])
+
+        result_rows.append(output)
+
+    return headers, result_rows
+
+
 def generate_mail_body(
+    workbook,
     current_rows: List[Dict[str, Any]],
     ref_map: Dict[Tuple[str, str, str], str],
     rs_count: int,
     rm_count: int,
     change_stats: Dict[str, int],
 ) -> None:
-    """요약/통계와 가이드 위반 내용을 mail_body.html로 생성합니다."""
+    """메일: 크롤링 요약 → 모요 판가 → 가이드 위반 순서."""
     from collections import Counter
     from datetime import datetime
 
@@ -939,15 +1055,15 @@ def generate_mail_body(
         except (TypeError, ValueError):
             return None
 
-    rs_items: List[List[Any]] = []
-    rm_items: List[List[Any]] = []
+    rs_items, rm_items = [], []
     for row in classified:
         if str(row.get("망정보") or "").strip() != "LG U+":
             continue
         fee_type = str(row.get("요금구분") or "").strip().upper()
         price = n(row.get("월 요금"))
         months = n(row.get("할인 기간"))
-        item = [row.get("사업자"), row.get("요금제"), row.get("월 요금"), row.get("할인 기간"), row.get("기간 이후 요금")]
+        item = [row.get("사업자"), row.get("요금제"), row.get("월 요금"),
+                row.get("할인 기간"), row.get("기간 이후 요금")]
         if fee_type == "RS" and (price == 0 or (months is not None and months <= 6)):
             rs_items.append(item)
         elif fee_type == "RM" and (price == 0 or (months is not None and months <= 5)):
@@ -975,20 +1091,26 @@ def generate_mail_body(
         ["기타 변경", change_stats.get("기타 변경", 0)],
     ]
 
+    moyo_headers, moyo_rows = _build_moyo_price_mail_rows(
+        workbook, current_rows, ref_map
+    )
     guide_headers = ["사업자", "요금제 명", "월 요금", "할인 기간", "기간 이후 요금"]
+
     body = [
         '<!doctype html><html><body style="font-family:Arial,Malgun Gothic,sans-serif;color:#222;line-height:1.5;">',
-        '<div style="max-width:1000px;margin:0 auto;">',
+        '<div style="max-width:1400px;margin:0 auto;">',
         '<h2 style="color:#17365D;margin-bottom:4px;">모요 요금제 Daily Report</h2>',
         '<p style="color:#666;margin-top:0;">자동 크롤링 및 가이드 점검 결과입니다.</p>',
-        _mail_html_table("요약 및 통계", ["항목", "값"], summary_rows),
+        _mail_html_table("크롤링 요약", ["항목", "값"], summary_rows),
+        _mail_html_table("모요 판가", moyo_headers, moyo_rows)
+            if moyo_headers else _mail_html_table("모요 판가", ["결과"], []),
         _mail_html_table("RS 요금제 가이드 위반", guide_headers, rs_items),
         _mail_html_table("RM 요금제 가이드 위반", guide_headers, rm_items),
         '<p style="margin-top:28px;color:#666;">상세 내용은 첨부된 <b>moyoplan_parsed_plans.xlsx</b> 파일을 확인해 주세요.</p>',
         '<p style="color:#888;font-size:12px;">이 메일은 자동으로 생성되었습니다.</p>',
         '</div></body></html>',
     ]
-    Path("mail_body.html").write_text(''.join(body), encoding="utf-8")
+    Path("mail_body.html").write_text("".join(body), encoding="utf-8")
     print("메일 본문 HTML: mail_body.html")
 
 
@@ -1047,8 +1169,13 @@ def save_outputs(
     # 모요 판가 시트는 사용자가 작성한 값/수식/서식을 수정하지 않고 그대로 보존합니다.
     desired = ["페이백 포함", "페이백 미포함", "가이드 위반", "전일 대비 변동", "요약 및 통계", "모요 판가", "참조"]
     workbook._sheets = [workbook[name] for name in desired]
+
+    # 당일 크롤링 데이터로 메일의 모요 판가를 계산합니다.
+    generate_mail_body(
+        workbook, current_excluded, ref_map, rs_count, rm_count, change_stats
+    )
+
     workbook.save(output_path)
-    generate_mail_body(current_excluded, ref_map, rs_count, rm_count, change_stats)
 
     if errors:
         pd.DataFrame(errors).to_csv(
