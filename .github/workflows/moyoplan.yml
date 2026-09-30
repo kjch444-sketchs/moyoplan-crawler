@@ -65,6 +65,10 @@ jobs:
           ls -lh mail_body.html
           wc -c mail_body.html
 
+          echo "===== Telegram guide alert ====="
+          test -s telegram_guide_alert.txt
+          wc -c telegram_guide_alert.txt
+
       - name: Upload Excel artifact
         uses: actions/upload-artifact@v4
         with:
@@ -121,3 +125,14 @@ jobs:
           attachments: moyoplan_parsed_plans.xlsx
 
           priority: normal
+
+      - name: Send guide violations to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.MVNO_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.MVNO_TELEGRAM_CHAT_ID }}
+        run: |
+          curl --fail --silent --show-error --request POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@telegram_guide_alert.txt" \
+            --data-urlencode "disable_web_page_preview=true"
