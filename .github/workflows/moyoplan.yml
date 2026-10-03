@@ -4,7 +4,7 @@ on:
   # 매일 한국시간 오전 7시 5분, 오후 8시 5분 자동 실행
   # KST 07:05, 20:05 = UTC 전날 22:05, 당일 11:05
   schedule:
-    - cron: "5 11,22 * * *"
+    - cron: "14 6,19 * * *"
 
   # GitHub Actions 화면에서 수동 실행 가능
   workflow_dispatch:
