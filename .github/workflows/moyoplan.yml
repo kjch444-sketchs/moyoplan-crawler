@@ -1,7 +1,7 @@
 name: Moyoplan Daily Crawler
 
 on:
-  # 매일 한국시간 오전 7시 5분, 오후 8시 5분
+  # 매일 한국시간 오전 7시 37분, 오후 8시 37분
   schedule:
     - cron: "37 8,20 * * *"
       timezone: "Asia/Seoul"
