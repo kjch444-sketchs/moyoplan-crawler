@@ -1,9 +1,9 @@
 name: Moyoplan Daily Crawler
 
 on:
-  # 매일 한국시간 오전 7시 37분, 오후 8시 37분
+  # 매일 한국시간 오전 3시 37분, 오후 1시 37분
   schedule:
-    - cron: "37 8,20 * * *"
+    - cron: "37 3,13 * * *"
       timezone: "Asia/Seoul"
 
   # GitHub Actions 화면에서 수동 실행 가능
