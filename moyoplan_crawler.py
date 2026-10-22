@@ -1039,6 +1039,30 @@ def _build_moyo_price_mail_rows(
     return headers, result_rows
 
 
+def _lowest_price_mail_rows(headers, price_rows):
+    """판가표의 각 요금제군에서 모든 공동 최저가 사업자·망을 반환합니다."""
+    result = []
+    for col in range(2, len(headers), 3):
+        category = headers[col].removesuffix(" 월 요금")
+        candidates = [row for row in price_rows
+                      if col < len(row) and isinstance(row[col], (int, float))
+                      and not isinstance(row[col], bool) and math.isfinite(row[col])]
+        if not candidates:
+            result.append([category, "해당 없음", "", ""])
+            continue
+        minimum = min(row[col] for row in candidates)
+        seen = set()
+        for row in candidates:
+            if row[col] != minimum:
+                continue
+            identity = (row[0], row[1])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append([category, row[0], row[1], minimum])
+    return result
+
+
 def generate_mail_body(
     workbook,
     current_rows: List[Dict[str, Any]],
@@ -1096,11 +1120,10 @@ def generate_mail_body(
         '<div style="max-width:1400px;margin:0 auto;">',
         '<h2 style="color:#17365D;margin-bottom:4px;">모요 요금제 Daily Report</h2>',
         '<p style="color:#666;margin-top:0;">자동 크롤링 및 가이드 점검 결과입니다.</p>',
-        _mail_html_table("크롤링 요약", ["항목", "값"], summary_rows),
-        _mail_html_table("모요 판가", moyo_headers, moyo_rows)
-            if moyo_headers else _mail_html_table("모요 판가", ["결과"], []),
         _mail_html_table("RS 요금제 가이드 위반", guide_headers, rs_items),
         _mail_html_table("RM 요금제 가이드 위반", guide_headers, rm_items),
+        _mail_html_table("요금제군별 최저가", ["요금제군", "사업자", "망정보", "월 요금(원)"],
+                         _lowest_price_mail_rows(moyo_headers, moyo_rows)),
         '<p style="margin-top:28px;color:#666;">상세 내용은 첨부된 <b>moyoplan_parsed_plans.xlsx</b> 파일을 확인해 주세요.</p>',
         '<p style="color:#888;font-size:12px;">이 메일은 자동으로 생성되었습니다.</p>',
         '</div></body></html>',
