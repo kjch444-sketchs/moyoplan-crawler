@@ -1166,7 +1166,6 @@ def generate_mail_body(
         if label == "RS":
             lines.append("[RM]")
 
-    lines.append("상세는 첨부 Excel의 '가이드 위반' 시트를 확인하세요.")
     telegram_path.write_text("\n".join(lines), encoding="utf-8")
     print("텔레그램 가이드 위반 알림: telegram_guide_alert.txt")
 
