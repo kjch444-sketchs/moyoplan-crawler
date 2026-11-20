@@ -52,6 +52,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: |
+          echo "CRAWL_MAIL_STAMP=$(TZ=Asia/Seoul date +'%Y%m%d_%H시%M분')" >> "$GITHUB_ENV"
           python -u moyoplan_crawler.py
 
       - name: Check generated files
@@ -101,10 +102,6 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_ENV"
 
-      - name: Set KST report date
-        run: |
-          echo "REPORT_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')" >> "$GITHUB_ENV"
-
       - name: Send Excel by Gmail
         uses: dawidd6/action-send-mail@v18
         with:
@@ -114,7 +111,7 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
 
-          subject: "모요 요금제 Daily Report (${{ env.REPORT_DATE }})"
+          subject: "${{ env.CRAWL_MAIL_STAMP }}_모요_크롤링데이터"
 
           from: ${{ secrets.MAIL_USERNAME }}
 
