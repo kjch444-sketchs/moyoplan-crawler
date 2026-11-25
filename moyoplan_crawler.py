@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import math
+from numbers import Real
 import os
 import random
 import re
@@ -1063,6 +1064,47 @@ def _lowest_price_mail_rows(headers, price_rows):
     return result
 
 
+HIGH_DATA_CAPACITIES = (95, 125, 150, 180)
+_HIGH_DATA_RE = re.compile(
+    r"^\s*(?:월\s*)?(95|125|150|180)\s*(?:GB|G|기가바이트|기가)"
+    r"(?![a-z0-9]|\s*(?:/\s*일|매일))",
+    re.IGNORECASE,
+)
+
+
+def _high_data_capacity(value):
+    """Match the base monthly allowance, not a daily/add-on amount or plan name."""
+    match = _HIGH_DATA_RE.match(str(value))
+    return int(match.group(1)) if match else None
+
+
+def _high_data_lowest_rows(rows):
+    """Append four capacity groups, retaining all tied carriers and networks."""
+    best = {}
+    for data, carrier, network, price in rows:
+        capacity = _high_data_capacity(data)
+        if (capacity is None or not isinstance(price, Real) or isinstance(price, bool)
+                or not math.isfinite(price) or price < 0):
+            continue
+        identity = (str(carrier or "").strip(), str(network or "").strip())
+        if not all(identity):
+            continue
+        previous_price, winners = best.get(capacity, (math.inf, set()))
+        if price < previous_price:
+            best[capacity] = price, {identity}
+        elif price == previous_price:
+            winners.add(identity)
+    result = []
+    for capacity in HIGH_DATA_CAPACITIES:
+        label = f"{capacity}G"
+        if capacity not in best:
+            result.append([label, "해당 없음", "", None])
+            continue
+        price, winners = best[capacity]
+        result.extend([label, carrier, network, price] for carrier, network in sorted(winners))
+    return result
+
+
 def generate_mail_body(
     workbook,
     current_rows: List[Dict[str, Any]],
@@ -1114,6 +1156,14 @@ def generate_mail_body(
         workbook, current_rows, ref_map
     )
     guide_headers = ["사업자", "요금제 명", "월 요금", "할인 기간", "기간 이후 요금"]
+    lowest_rows = [
+        row for row in _lowest_price_mail_rows(moyo_headers, moyo_rows)
+        if _high_data_capacity(row[0]) is None
+    ]
+    lowest_rows.extend(_high_data_lowest_rows(
+        (row.get("데이터 제공량"), row.get("사업자"), row.get("망정보"), row.get("월 요금"))
+        for row in current_rows
+    ))
 
     body = [
         '<!doctype html><html><body style="font-family:Arial,Malgun Gothic,sans-serif;color:#222;line-height:1.5;">',
@@ -1123,7 +1173,8 @@ def generate_mail_body(
         _mail_html_table("RS 요금제 가이드 위반", guide_headers, rs_items),
         _mail_html_table("RM 요금제 가이드 위반", guide_headers, rm_items),
         _mail_html_table("요금제군별 최저가", ["요금제군", "사업자", "망정보", "월 요금(원)"],
-                         _lowest_price_mail_rows(moyo_headers, moyo_rows)),
+                         lowest_rows),
+        '<p style="color:#666;font-size:12px;">95G·125G·150G·180G는 RS/RM과 관계없이 페이백 미포함 월 요금 기준입니다.</p>',
         '<p style="margin-top:28px;color:#666;">상세 내용은 첨부된 <b>moyoplan_parsed_plans.xlsx</b> 파일을 확인해 주세요.</p>',
         '<p style="color:#888;font-size:12px;">이 메일은 자동으로 생성되었습니다.</p>',
         '</div></body></html>',
