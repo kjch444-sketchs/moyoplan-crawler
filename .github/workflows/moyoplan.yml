@@ -93,13 +93,16 @@ jobs:
             git push origin HEAD:main
           fi
 
-      - name: Prepare HTML mail body
+      - name: Prepare Excel mail attachment and HTML body
         run: |
+          : "${CRAWL_MAIL_STAMP:?Missing crawl start timestamp}"
+          subject="${CRAWL_MAIL_STAMP}_모요_크롤링데이터"
+          attachment="${subject}.xlsx"
+          cp -- moyoplan_parsed_plans.xlsx "$attachment"
+          sed "s/moyoplan_parsed_plans\\.xlsx/$attachment/g" mail_body.html > mail_delivery_body.html
           {
-            echo 'MAIL_BODY<<EOF'
-            cat mail_body.html
-            echo
-            echo 'EOF'
+            printf 'CRAWL_MAIL_SUBJECT=%s\n' "$subject"
+            printf 'CRAWL_MAIL_ATTACHMENT=%s\n' "$attachment"
           } >> "$GITHUB_ENV"
 
       - name: Send Excel by Gmail
@@ -111,15 +114,15 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
 
-          subject: "${{ env.CRAWL_MAIL_STAMP }}_모요_크롤링데이터"
+          subject: ${{ env.CRAWL_MAIL_SUBJECT }}
 
           from: ${{ secrets.MAIL_USERNAME }}
 
           to: "kjch444@lguplus.co.kr, junghoonchoi@lguplus.co.kr, ydythetop@lguplus.co.kr, jjang@lguplus.co.kr, 33soso@lguplus.co.kr"
 
-          html_body: ${{ env.MAIL_BODY }}
+          html_body: file://mail_delivery_body.html
 
-          attachments: moyoplan_parsed_plans.xlsx
+          attachments: ${{ env.CRAWL_MAIL_ATTACHMENT }}
 
           priority: normal
 
