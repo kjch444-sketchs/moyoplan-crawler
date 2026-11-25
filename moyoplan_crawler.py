@@ -925,18 +925,10 @@ def _mail_html_table(title: str, headers: List[str], rows: List[List[Any]]) -> s
     return ''.join(parts)
 
 
-def _build_moyo_price_mail_rows(
-    workbook,
-    current_rows: List[Dict[str, Any]],
-    ref_map: Dict[Tuple[str, str, str], str],
-) -> Tuple[List[str], List[List[Any]]]:
-    """모요 판가 시트 수식과 같은 조건으로 당일 메일용 판가표를 계산합니다."""
+def _moyo_mail_categories(workbook):
     if "모요 판가" not in workbook.sheetnames or "참조" not in workbook.sheetnames:
-        return [], []
-
-    price_ws = workbook["모요 판가"]
-    ref_ws = workbook["참조"]
-
+        return []
+    price_ws, ref_ws = workbook["모요 판가"], workbook["참조"]
     category_map: Dict[str, Tuple[str, str, str]] = {}
     for r in range(2, ref_ws.max_row + 1):
         key = ref_ws.cell(r, 6).value
@@ -950,6 +942,29 @@ def _build_moyo_price_mail_rows(
                 str(sms or "").strip(),
             )
 
+    categories = []
+    for col in (4, 7, 10, 13, 16, 19, 22, 25):
+        title = price_ws.cell(3, col).value
+        if title not in (None, ""):
+            label = str(title).strip()
+            criteria = category_map.get(label.replace("GB", "G"))
+            if criteria:
+                categories.append((label, criteria))
+    return categories
+
+
+def _build_moyo_price_mail_rows(
+    workbook,
+    current_rows: List[Dict[str, Any]],
+    ref_map: Dict[Tuple[str, str, str], str],
+) -> Tuple[List[str], List[List[Any]]]:
+    """모요 판가 시트 수식과 같은 조건으로 당일 메일용 판가표를 계산합니다."""
+    if "모요 판가" not in workbook.sheetnames or "참조" not in workbook.sheetnames:
+        return [], []
+
+    price_ws = workbook["모요 판가"]
+    ref_ws = workbook["참조"]
+
     business_map: Dict[str, str] = {}
     for r in range(2, ref_ws.max_row + 1):
         canonical = ref_ws.cell(r, 11).value
@@ -961,19 +976,9 @@ def _build_moyo_price_mail_rows(
                 business_map[str(canonical).strip()] = str(mapped).strip()
 
     classified = _classify_rows(current_rows, ref_map)
-    category_cols = [4, 7, 10, 13, 16, 19, 22, 25]
     headers = ["사업자", "망"]
-    categories = []
-
-    for col in category_cols:
-        title = price_ws.cell(3, col).value
-        if title in (None, ""):
-            continue
-        title_text = str(title).strip()
-        criteria = category_map.get(title_text.replace("GB", "G"))
-        if not criteria:
-            continue
-        categories.append((title_text, criteria))
+    categories = _moyo_mail_categories(workbook)
+    for title_text, _ in categories:
         headers.extend([
             f"{title_text} 월 요금",
             f"{title_text} 할인 기간",
@@ -1105,6 +1110,295 @@ def _high_data_lowest_rows(rows):
     return result
 
 
+COMPETITIVENESS_SHEET = "경쟁력 대시보드"
+_DASHBOARD_STATE = "moyo-price-dashboard-v1"
+_COMPARISON_TITLE = "직전 회차 대비 최저가 변화"
+
+
+def _nonnegative_price(value):
+    return (
+        isinstance(value, Real)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _moyo_mail_lowest_rows(workbook, rows, ref_map):
+    headers, prices = _build_moyo_price_mail_rows(workbook, rows, ref_map)
+    return [
+        row
+        for row in _lowest_price_mail_rows(headers, prices)
+        if _high_data_capacity(row[0]) is None
+    ] + _high_data_lowest_rows(
+        (row.get("데이터 제공량"), row.get("사업자"), row.get("망정보"), row.get("월 요금"))
+        for row in rows
+    )
+
+
+def _lowest_by_group(rows):
+    grouped = {}
+    for group, carrier, network, price in rows:
+        minimum, winners = grouped.setdefault(group, (None, set()))
+        if not _nonnegative_price(price) or not carrier or not network:
+            continue
+        if minimum is None or price < minimum:
+            grouped[group] = price, {(carrier, network)}
+        elif minimum == price:
+            winners.add((carrier, network))
+    return grouped
+
+
+def _lowest_change_rows(old_rows, new_rows):
+    old = _lowest_by_group(old_rows)
+    new = _lowest_by_group(new_rows)
+
+    def winners_text(winners):
+        return " / ".join(f"{carrier} ({network})" for carrier, network in sorted(winners)) or "—"
+
+    results = []
+    for group in dict.fromkeys([*new, *old]):
+        old_price, old_winners = old.get(group, (None, set()))
+        new_price, new_winners = new.get(group, (None, set()))
+        if (old_price, old_winners) == (new_price, new_winners):
+            continue
+        if old_price is None:
+            change = "최저가 확인"
+        elif new_price is None:
+            change = "해당 없음"
+        else:
+            price_change = new_price - old_price
+            change = f"{price_change:+,}원" if price_change else "동일"
+            if old_winners != new_winners:
+                change += " · 최저가 사업자/망 변경"
+        results.append([
+            group, old_price if old_price is not None else "—", winners_text(old_winners),
+            new_price if new_price is not None else "—", winners_text(new_winners), change,
+        ])
+    return results
+
+
+def _unverifiable_mail_groups(workbook, rows):
+    unresolved, affected = 0, set()
+    categories = _moyo_mail_categories(workbook)
+    for row in rows:
+        data, voice, sms, carrier, network = (
+            str(row.get(key) or "").strip()
+            for key in ("데이터 제공량", "통화제공량", "문자제공량", "사업자", "망정보")
+        )
+        price_ok = _nonnegative_price(row.get("월 요금"))
+        if not data:
+            unresolved += 1
+            continue
+        capacity = _high_data_capacity(data)
+        if capacity is not None:
+            if not (price_ok and carrier and network):
+                affected.add(f"{capacity}G")
+            continue
+        for group, (expected_data, expected_voice, expected_sms) in categories:
+            # A known non-comparison group with a bad value does not hide changes elsewhere.
+            if (data != expected_data or (voice and voice != expected_voice)
+                    or (sms and sms != expected_sms) or _high_data_capacity(group) is not None):
+                continue
+            if not (price_ok and carrier and network and voice and sms):
+                affected.add(group)
+    return unresolved, affected
+
+
+def _lowest_change_mail(workbook, previous_rows, lowest, ref_map, current_issues,
+                        previous_status, current_stamp, previous_stamp, blocked_groups):
+    heading = (
+        f'<h3 style="margin:24px 0 8px;color:#1F4E78;">{_COMPARISON_TITLE}</h3>'
+    )
+
+    def paragraph(note):
+        return f'<p style="margin:4px 0 12px;color:#666;">{html.escape(note)}</p>'
+
+    if current_issues:
+        note = "이번 회차의 수집이 불완전하거나 검증되지 않아 변화 비교를 생략했습니다."
+    elif previous_status == "incomplete":
+        note = "직전 회차의 수집이 불완전하거나 검증되지 않아 변화 비교를 생략했습니다."
+    elif previous_status != "complete" or not previous_rows:
+        note = "첫 비교 회차입니다. 검증된 직전 회차가 없어 다음 정상 회차부터 비교합니다."
+    else:
+        all_previous = _moyo_mail_lowest_rows(workbook, previous_rows, ref_map)
+        changes = _lowest_change_rows(
+            [row for row in all_previous if row[0] not in blocked_groups],
+            [row for row in lowest if row[0] not in blocked_groups],
+        )
+        context = ""
+        if current_stamp and previous_stamp:
+            context += paragraph(f"직전 {previous_stamp} → 이번 {current_stamp} (한국시간)")
+        if blocked_groups:
+            excluded = " · ".join(sorted(blocked_groups))
+            context += paragraph(f"필수 항목이 불완전한 요금제군은 비교에서 제외했습니다: {excluded}")
+        if changes:
+            table = _mail_html_table(
+                _COMPARISON_TITLE,
+                ["요금제군", "직전 최저가(원)", "직전 사업자·망", "이번 최저가(원)",
+                 "이번 사업자·망", "변화"],
+                changes,
+            )
+            return table.replace("</h3>", "</h3>" + context, 1)
+        if blocked_groups and all(row[0] in blocked_groups for row in lowest):
+            note = "검증 가능한 요금제군이 없습니다."
+        else:
+            note = ("비교 가능한 군의 " if blocked_groups else "") + "최저가와 공동 최저가 사업자·망의 변화가 없습니다."
+        return heading + context + paragraph(note)
+    return heading + paragraph(note)
+
+
+def _reference_dashboard_types(workbook):
+    """Keep conflicts separate instead of assigning a tier by last reference row."""
+    classifications = {}
+    ws = workbook["참조"]
+    for _, data, tier, voice, sms in ws.iter_rows(min_row=2, max_col=5, values_only=True):
+        key = tuple(str(value).strip() if value is not None else "" for value in (data, voice, sms))
+        tier = str(tier or "").strip().upper()
+        if all(key) and tier:
+            classifications.setdefault(key, set()).add(tier)
+    return classifications
+
+
+def _dashboard_competitiveness(rows, classifications):
+    from collections import Counter
+    from fractions import Fraction
+
+    groups = {"RS": {}, "RM": {}}
+    excluded = Counter()
+    for row in rows:
+        key = tuple(str(row.get(k) or "").strip()
+                    for k in ("데이터 제공량", "통화제공량", "문자제공량"))
+        carrier = str(row.get("사업자") or "").strip()
+        price = row.get("월 요금")
+        if not all(key) or not carrier or not str(row.get("망정보") or "").strip():
+            excluded["필수 항목 누락"] += 1
+            continue
+        if not _nonnegative_price(price):
+            excluded["유효 월 요금 없음"] += 1
+            continue
+        tier = classifications.get(key, set())
+        if len(tier) > 1:
+            excluded["참조 구분 충돌"] += 1
+            continue
+        if tier not in ({"RS"}, {"RM"}):
+            excluded["RS/RM 미분류"] += 1
+            continue
+        prices = groups[next(iter(tier))].setdefault(key, {})
+        prices[carrier] = min(price, prices.get(carrier, price))
+
+    rankings = {}
+    for tier, price_groups in groups.items():
+        sold = Counter()
+        wins = {}
+        for group, prices in price_groups.items():
+            minimum = min(prices.values())
+            for carrier, price in prices.items():
+                sold[carrier] += 1
+                if price == minimum:
+                    wins.setdefault(carrier, []).append((price, group))
+        rows_out = [
+            (carrier, len(wins.get(carrier, ())), count, wins.get(carrier, []))
+            for carrier, count in sold.items()
+        ]
+        rows_out.sort(key=lambda row: (-row[1], -Fraction(row[1], row[2]), row[0].casefold(), row[0]))
+        ranked = []
+        previous_key = None
+        rank = 0
+        for position, (carrier, won, count, strengths) in enumerate(rows_out, 1):
+            ranking_key = won, Fraction(won, count)
+            if ranking_key != previous_key:
+                rank, previous_key = position, ranking_key
+            details = [
+                f"{' / '.join(group)} ({price:,}원)"
+                for price, group in sorted(strengths)[:3]
+            ]
+            if len(strengths) > len(details):
+                details.append(f"외 {len(strengths) - len(details)}개")
+            ranked.append((rank, carrier, won, count, won / count, " · ".join(details) or "—"))
+        rankings[tier] = len(price_groups), ranked
+    return rankings, excluded
+
+
+def _write_competitiveness_dashboard(workbook, rows, issues, run_stamp):
+    from openpyxl.formatting.rule import DataBarRule
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    rankings, excluded = _dashboard_competitiveness(rows, _reference_dashboard_types(workbook))
+    if COMPETITIVENESS_SHEET in workbook.sheetnames:
+        index = workbook.sheetnames.index(COMPETITIVENESS_SHEET)
+        workbook.remove(workbook[COMPETITIVENESS_SHEET])
+    else:
+        index = len(workbook.sheetnames)
+    ws = workbook.create_sheet(COMPETITIVENESS_SHEET, index)
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "C5"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    def banner(r, message, background, foreground, *, size=11, height=22):
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        cell = ws.cell(r, 1, message)
+        cell.fill = PatternFill("solid", fgColor=background)
+        cell.font = Font(color=foreground, size=size, bold=True)
+        cell.alignment = Alignment(vertical="center", wrap_text=True, indent=1)
+        ws.row_dimensions[r].height = height
+
+    banner(1, "모요 | RS·RM 사업자 판가 경쟁력", "17365D", "FFFFFF", size=18, height=33)
+    banner(2, f"페이백 미포함 월 요금 · {run_stamp} (KST) · 원본 {len(rows):,}행",
+           "D9EAF7", "17365D")
+    if issues:
+        reasons = " · ".join(issues)
+        banner(3, f"수집 검증 제한: {reasons} | 확인된 행만으로 산출한 잠정 순위", "FFF0CD", "805A19", height=38)
+    else:
+        banner(3, "공동 최저가 포함 · 동일 사업자·요금제군은 망이 여러 개여도 1회 · 공동 순위는 같은 순위",
+               "E8F3EE", "1A684C")
+    kinds = ("필수 항목 누락", "유효 월 요금 없음", "참조 구분 충돌", "RS/RM 미분류")
+    note = " / ".join(f"{key} {excluded[key]:,}행" for key in kinds)
+    banner(4, f"비교 제외 {sum(excluded.values()):,}행 · {note}", "F3F6F9", "435A6C", height=26)
+    banner(5, "비교군: 데이터·통화·문자 제공량 동일 | 순위: 최저가군 수 → 최저가율 | 최저가율: 최저가군 ÷ 판매군",
+           "F3F6F9", "435A6C", height=25)
+    at = 7
+    headers = ("순위", "사업자", "최저가군", "판매군", "최저가율", "최저가 강점 요금제군(최대 3개)")
+    for tier, (group_count, ranking_rows) in rankings.items():
+        banner(at, f"{tier} 요금제 경쟁력 | 전체 비교군 {group_count:,}개",
+               "1F4E78" if tier == "RS" else "216B63", "FFFFFF")
+        for col, label in enumerate(headers, 1):
+            cell = ws.cell(at + 1, col, label)
+            cell.fill = PatternFill("solid", fgColor="D9EAF7")
+            cell.font = Font(bold=True, color="17365D")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        first = at + 2
+        if not ranking_rows:
+            banner(first, "비교 가능한 요금제가 없습니다.", "F3F6F9", "435A6C")
+            at = first + 2
+            continue
+        for row_no, values in enumerate(ranking_rows, first):
+            for col, value in enumerate(values, 1):
+                cell = ws.cell(row_no, col, value)
+                if isinstance(value, str):
+                    cell.data_type = "s"
+                cell.fill = PatternFill("solid", fgColor="FFFFFF" if row_no % 2 else "F3F6F9")
+                cell.alignment = Alignment(horizontal="center" if col not in (2, 6) else "left",
+                                           vertical="center", wrap_text=col == 6)
+                if col in (1, 2):
+                    cell.font = Font(color="17365D", bold=True)
+                if col == 5:
+                    cell.number_format = "0.0%"
+            ws.row_dimensions[row_no].height = 32
+        last = first + len(ranking_rows) - 1
+        ws.conditional_formatting.add(f"E{first}:E{last}", DataBarRule(
+            start_type="num", start_value=0, end_type="num", end_value=1,
+            color="78B6D8" if tier == "RS" else "68B9A9", showValue=True,
+        ))
+        at = last + 2
+    for col, width in enumerate((8, 23, 13, 13, 14, 80), 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws["J1"], ws["J2"] = _DASHBOARD_STATE, ("incomplete" if issues else "complete")
+    ws["J3"] = run_stamp
+    ws.column_dimensions["J"].hidden = True
+
+
 def generate_mail_body(
     workbook,
     current_rows: List[Dict[str, Any]],
@@ -1112,8 +1406,14 @@ def generate_mail_body(
     rs_count: int,
     rm_count: int,
     change_stats: Dict[str, int],
+    previous_rows=None,
+    current_issues=(),
+    previous_status=None,
+    current_stamp=None,
+    previous_stamp=None,
+    blocked_groups=(),
 ) -> None:
-    """메일: 크롤링 요약 → 모요 판가 → 가이드 위반 순서."""
+    """페이백 미포함 최저가 변화와 기존 가이드·최저가 표를 메일로 작성합니다."""
     from collections import Counter
     from datetime import datetime
 
@@ -1152,24 +1452,17 @@ def generate_mail_body(
         ["기타 변경", change_stats.get("기타 변경", 0)],
     ]
 
-    moyo_headers, moyo_rows = _build_moyo_price_mail_rows(
-        workbook, current_rows, ref_map
-    )
     guide_headers = ["사업자", "요금제 명", "월 요금", "할인 기간", "기간 이후 요금"]
-    lowest_rows = [
-        row for row in _lowest_price_mail_rows(moyo_headers, moyo_rows)
-        if _high_data_capacity(row[0]) is None
-    ]
-    lowest_rows.extend(_high_data_lowest_rows(
-        (row.get("데이터 제공량"), row.get("사업자"), row.get("망정보"), row.get("월 요금"))
-        for row in current_rows
-    ))
+    lowest_rows = _moyo_mail_lowest_rows(workbook, current_rows, ref_map)
 
     body = [
         '<!doctype html><html><body style="font-family:Arial,Malgun Gothic,sans-serif;color:#222;line-height:1.5;">',
         '<div style="max-width:1400px;margin:0 auto;">',
         '<h2 style="color:#17365D;margin-bottom:4px;">모요 요금제 Daily Report</h2>',
         '<p style="color:#666;margin-top:0;">자동 크롤링 및 가이드 점검 결과입니다.</p>',
+        _lowest_change_mail(workbook, previous_rows or [], lowest_rows, ref_map,
+                            current_issues, previous_status, current_stamp, previous_stamp,
+                            blocked_groups),
         _mail_html_table("RS 요금제 가이드 위반", guide_headers, rs_items),
         _mail_html_table("RM 요금제 가이드 위반", guide_headers, rm_items),
         _mail_html_table("요금제군별 최저가", ["요금제군", "사업자", "망정보", "월 요금(원)"],
@@ -1267,9 +1560,12 @@ def _refresh_moyo_price_formula_ranges(workbook, current_last_row: int) -> None:
 def save_outputs(
     results: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
     errors: List[Dict[str, Any]],
+    collection_checks=None,
+    run_stamp=None,
 ) -> None:
-    """기존 엑셀의 참조/가이드 양식을 보존하면서 6개 시트를 자동 갱신합니다."""
-    from openpyxl import Workbook, load_workbook
+    """기존 양식을 보존하고 크롤링 결과·경쟁력 대시보드를 갱신합니다."""
+    from datetime import datetime, timedelta, timezone
+    from openpyxl import load_workbook
 
     dataframes: List[Tuple[Dict[str, Any], pd.DataFrame]] = []
     result_by_sheet: Dict[str, List[Dict[str, Any]]] = {}
@@ -1299,6 +1595,12 @@ def save_outputs(
 
     # 기존 Sheet2는 오늘 데이터로 덮기 전에 전일 비교용으로 메모리에 보관
     previous_rows = _sheet_rows_as_dicts(workbook["페이백 미포함"])
+    previous_status = previous_stamp = None
+    if COMPETITIVENESS_SHEET in workbook.sheetnames:
+        dashboard = workbook[COMPETITIVENESS_SHEET]
+        if dashboard["J1"].value == _DASHBOARD_STATE:
+            previous_status = dashboard["J2"].value
+            previous_stamp = dashboard["J3"].value
 
     # 참조는 사용자가 관리하는 마스터 데이터. Python은 수정하지 않음.
     ref_map = _reference_map(workbook)
@@ -1319,9 +1621,23 @@ def save_outputs(
 
     # 마스터의 시트 순서와 추가 시트는 그대로 보존합니다.
 
-    # 당일 크롤링 데이터로 메일의 모요 판가를 계산합니다.
+    # 비교 기준은 항상 페이백 미포함입니다. 행 부족·파싱 오류 등의
+    # 징후가 있는 회차를 정상 기준으로 사용하지 않습니다.
+    issues = list((collection_checks or {}).get("페이백 미포함", ("수집 완료 근거 없음",)))
+    unresolved, blocked_groups = _unverifiable_mail_groups(workbook, current_excluded)
+    if unresolved:
+        issues.append(f"요금제군을 확인할 수 없는 행 {unresolved:,}건")
+    if not current_excluded:
+        issues.append("페이백 미포함 수집 결과 없음")
+
+    run_stamp = run_stamp or datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
+    _, previous_blocked = _unverifiable_mail_groups(workbook, previous_rows)
+    _write_competitiveness_dashboard(workbook, current_excluded, issues, run_stamp)
     generate_mail_body(
-        workbook, current_excluded, ref_map, rs_count, rm_count, change_stats
+        workbook, current_excluded, ref_map, rs_count, rm_count, change_stats,
+        previous_rows=previous_rows, current_issues=issues, previous_status=previous_status,
+        current_stamp=run_stamp, previous_stamp=previous_stamp,
+        blocked_groups=blocked_groups | previous_blocked,
     )
 
     workbook.save(output_path)
@@ -1353,8 +1669,11 @@ def crawl_dataset(
     config: Dict[str, Any],
     detail_cache: Dict[str, Dict[str, str]],
     all_errors: List[Dict[str, Any]],
+    collection_checks=None,
 ) -> List[Dict[str, Any]]:
     label = config["label"]
+    errors_before = len(all_errors)
+    issues = []
     rows: List[Dict[str, Any]] = []
 
     print("\n" + "=" * 70)
@@ -1372,6 +1691,7 @@ def crawl_dataset(
 
     if MAX_PAGES is not None:
         page_count = MAX_PAGES
+        issues.append("시험용 지정 페이지 수집")
         print(f"지정 모드: {page_count}페이지 수집")
     else:
         total_count = detect_total_count(first_soup)
@@ -1379,6 +1699,7 @@ def crawl_dataset(
             page_count = math.ceil(total_count / PAGE_SIZE)
             print(f"전체 {total_count:,}건 / 예상 {page_count:,}페이지")
         else:
+            issues.append("사이트 표시 전체 건수 미확인")
             print(
                 "[안내] 전체 건수 문구를 찾지 못했습니다. "
                 "빈 페이지 또는 동일 페이지의 반복을 감지할 때까지 "
@@ -1395,6 +1716,7 @@ def crawl_dataset(
             break
 
         if page_index >= AUTO_PAGE_LIMIT:
+            issues.append("자동 탐색 상한 도달")
             print(
                 f"[안전 중단] 자동 탐색 상한 {AUTO_PAGE_LIMIT:,}페이지에 "
                 "도달했습니다. 사이트 페이지 구조를 확인하세요."
@@ -1431,6 +1753,8 @@ def crawl_dataset(
             )
 
         if not cards:
+            if page_count is not None and "예상 페이지에 빈 결과" not in issues:
+                issues.append("예상 페이지에 빈 결과")
             consecutive_empty_pages += 1
             print(
                 f"  빈 페이지 "
@@ -1449,18 +1773,25 @@ def crawl_dataset(
 
         consecutive_empty_pages = 0
 
-        # 전체 건수를 읽지 못한 경우에만 동일 페이지 반복 여부를 종료 안전장치로 확인합니다.
-        # 아래 비교는 저장 행을 제거하지 않습니다. 해당 페이지의 모든 카드를 먼저 저장한 뒤,
-        # 완전히 같은 페이지가 계속 반환될 때 무한 탐색만 중단합니다.
+        # 반복 페이지는 여전히 저장합니다. 전체 건수를 알 수 있는 경우에도
+        # 같은 페이지가 반복되면 정상 비교 기준에서는 제외합니다.
+        current_signature = tuple(
+            (card["detail_url"], card["card_text"]) for card in cards
+        )
         if page_count is None:
-            current_signature = tuple(
-                (card["detail_url"], card["card_text"]) for card in cards
-            )
             if current_signature == previous_page_signature:
                 consecutive_identical_pages += 1
             else:
                 consecutive_identical_pages = 0
-            previous_page_signature = current_signature
+        elif current_signature == previous_page_signature:
+            if "예상 페이지 내용 반복" not in issues:
+                issues.append("예상 페이지 내용 반복")
+        previous_page_signature = current_signature
+
+        if total_count is not None:
+            expected_here = min(PAGE_SIZE, total_count - page_index * PAGE_SIZE)
+            if len(cards) < expected_here and "예상 페이지 카드 부족" not in issues:
+                issues.append("예상 페이지 카드 부족")
 
         # 중복 여부와 관계없이 현재 페이지에서 발견된 모든 카드를 순서대로 저장합니다.
         for card in cards:
@@ -1544,9 +1875,18 @@ def crawl_dataset(
             "페이지 내 반복 노출이 모두 포함되어 건수가 다를 수 있습니다."
         )
 
+    if total_count is not None and len(rows) < total_count:
+        issues.append(f"표시 건수 대비 {total_count - len(rows):,}행 부족")
+    if len(all_errors) > errors_before:
+        issues.append(f"요청/파싱 오류 {len(all_errors) - errors_before:,}건")
+    if collection_checks is not None:
+        collection_checks[config["sheet_name"]] = tuple(issues)
     return rows
 
 def crawl() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    run_stamp = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
     session = build_session()
     print(f"SSL 인증서 검증: {ssl_mode_description()}")
     if (
@@ -1563,6 +1903,7 @@ def crawl() -> None:
     all_results: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
     all_errors: List[Dict[str, Any]] = []
     detail_cache: Dict[str, Dict[str, str]] = {}
+    collection_checks = {}
 
     for config in SHEET_CONFIGS:
         rows = crawl_dataset(
@@ -1570,10 +1911,11 @@ def crawl() -> None:
             config=config,
             detail_cache=detail_cache,
             all_errors=all_errors,
+            collection_checks=collection_checks,
         )
         all_results.append((config, rows))
 
-    save_outputs(all_results, all_errors)
+    save_outputs(all_results, all_errors, collection_checks, run_stamp)
 
 
 if __name__ == "__main__":
